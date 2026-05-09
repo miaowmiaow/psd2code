@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 280" font-family="-apple-system, 'PingFang SC', sans-serif">
+  <text x="450" y="28" text-anchor="middle" font-size="18" font-weight="600" fill="#222">中文短标题字号修复前后</text>
+
+  <!-- Before -->
+  <g transform="translate(60,70)">
+    <text x="170" y="0" text-anchor="middle" font-size="13" font-weight="600" fill="#c0392b">修复前（仅纵向兜底）</text>
+    <rect x="0" y="20" width="340" height="160" rx="8" fill="#fff" stroke="#c0392b" stroke-width="2" stroke-dasharray="6 4"/>
+
+    <!-- Box for "预测四强" -->
+    <rect x="20" y="40" width="164" height="55" fill="#fadbd8" stroke="#c0392b" stroke-width="1"/>
+    <text x="102" y="68" text-anchor="middle" font-size="38" fill="#333" font-weight="700">预测四</text>
+    <text x="102" y="100" text-anchor="middle" font-size="38" fill="#333" font-weight="700">强</text>
+    <text x="102" y="120" text-anchor="middle" font-size="10" fill="#c0392b">字号 46.75 → 折成两行</text>
+
+    <!-- Box for "主赛区" -->
+    <rect x="200" y="40" width="122" height="55" fill="#fadbd8" stroke="#c0392b" stroke-width="1"/>
+    <text x="261" y="68" text-anchor="middle" font-size="38" fill="#333" font-weight="700">主赛</text>
+    <text x="261" y="100" text-anchor="middle" font-size="38" fill="#333" font-weight="700">区</text>
+    <text x="261" y="120" text-anchor="middle" font-size="10" fill="#c0392b">字号 46.75 → 折成两行</text>
+  </g>
+
+  <!-- VS -->
+  <text x="450" y="160" text-anchor="middle" font-size="20" font-weight="700" fill="#5b6cff">→</text>
+
+  <!-- After -->
+  <g transform="translate(490,70)">
+    <text x="170" y="0" text-anchor="middle" font-size="13" font-weight="600" fill="#196f3d">修复后（叠加横向中文兜底）</text>
+    <rect x="0" y="20" width="340" height="160" rx="8" fill="#fff" stroke="#196f3d" stroke-width="2"/>
+
+    <!-- Box for "预测四强" -->
+    <rect x="20" y="40" width="164" height="55" fill="#d5f5e3" stroke="#196f3d" stroke-width="1"/>
+    <text x="102" y="78" text-anchor="middle" font-size="32" fill="#196f3d" font-weight="700">预测四强</text>
+    <text x="102" y="120" text-anchor="middle" font-size="10" fill="#196f3d">字号 38.5 → 单行 ✓</text>
+
+    <!-- Box for "主赛区" -->
+    <rect x="200" y="40" width="122" height="55" fill="#d5f5e3" stroke="#196f3d" stroke-width="1"/>
+    <text x="261" y="78" text-anchor="middle" font-size="32" fill="#196f3d" font-weight="700">主赛区</text>
+    <text x="261" y="120" text-anchor="middle" font-size="10" fill="#196f3d">字号 38.0 → 单行 ✓</text>
+  </g>
+
+  <text x="450" y="265" text-anchor="middle" font-size="11" fill="#666">
+    实测案例：总决赛-折叠 PSD（width / 字数 × 0.95 自动控制字号上限）
+  </text>
+</svg>
