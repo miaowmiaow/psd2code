@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" font-family="-apple-system, 'PingFang SC', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6cff"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="32" text-anchor="middle" font-size="18" font-weight="600" fill="#222">PSD 文字字号修正流水线</text>
+
+  <!-- Step 1: raw -->
+  <g transform="translate(40,80)">
+    <rect width="180" height="180" rx="10" fill="#fff5e6" stroke="#e67e22" stroke-width="2"/>
+    <text x="90" y="28" text-anchor="middle" font-size="13" font-weight="600" fill="#b9770e">① raw FontSize</text>
+    <text x="90" y="56" text-anchor="middle" font-size="11" fill="#666">从 engine_dict 读取</text>
+    <text x="90" y="105" text-anchor="middle" font-size="32" font-weight="600" fill="#333">17.5</text>
+    <text x="90" y="130" text-anchor="middle" font-size="11" fill="#999">px (PSD 原始值)</text>
+    <text x="90" y="160" text-anchor="middle" font-size="20" fill="#999" font-style="italic">消耗99兑换币</text>
+  </g>
+
+  <!-- Arrow 1 -->
+  <line x1="225" y1="170" x2="265" y2="170" stroke="#5b6cff" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="245" y="160" text-anchor="middle" font-size="10" fill="#5b6cff">× scale</text>
+
+  <!-- Step 2: scale -->
+  <g transform="translate(270,80)">
+    <rect width="180" height="180" rx="10" fill="#e8f6ff" stroke="#3498db" stroke-width="2"/>
+    <text x="90" y="28" text-anchor="middle" font-size="13" font-weight="600" fill="#1f618d">② transform 修正</text>
+    <text x="90" y="56" text-anchor="middle" font-size="11" fill="#666">× transform[0] (scale)</text>
+    <text x="90" y="105" text-anchor="middle" font-size="32" font-weight="600" fill="#333">28.0</text>
+    <text x="90" y="130" text-anchor="middle" font-size="11" fill="#999">17.5 × 1.6</text>
+    <text x="90" y="160" text-anchor="middle" font-size="26" fill="#333">消耗99兑换币</text>
+  </g>
+
+  <!-- Arrow 2 -->
+  <line x1="455" y1="170" x2="495" y2="170" stroke="#5b6cff" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="475" y="160" text-anchor="middle" font-size="10" fill="#5b6cff">兜底</text>
+
+  <!-- Step 3: vertical -->
+  <g transform="translate(500,80)">
+    <rect width="180" height="180" rx="10" fill="#fef9e7" stroke="#f1c40f" stroke-width="2"/>
+    <text x="90" y="28" text-anchor="middle" font-size="13" font-weight="600" fill="#b7950b">③ 纵向兜底</text>
+    <text x="90" y="56" text-anchor="middle" font-size="11" fill="#666">≥ height × 0.85 → 截断</text>
+    <text x="90" y="105" text-anchor="middle" font-size="32" font-weight="600" fill="#333">22.1</text>
+    <text x="90" y="130" text-anchor="middle" font-size="11" fill="#999">26 × 0.85 = 22.1</text>
+    <text x="90" y="160" text-anchor="middle" font-size="22" fill="#333">消耗99兑换币</text>
+  </g>
+
+  <!-- Arrow 3 -->
+  <line x1="685" y1="170" x2="725" y2="170" stroke="#5b6cff" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="705" y="160" text-anchor="middle" font-size="10" fill="#5b6cff">中文兜底</text>
+
+  <!-- Step 4: width -->
+  <g transform="translate(730,80)">
+    <rect width="150" height="180" rx="10" fill="#eafaf1" stroke="#27ae60" stroke-width="2"/>
+    <text x="75" y="28" text-anchor="middle" font-size="13" font-weight="600" fill="#196f3d">④ 横向中文兜底</text>
+    <text x="75" y="56" text-anchor="middle" font-size="10" fill="#666">width / 字数 × 0.95</text>
+    <text x="75" y="105" text-anchor="middle" font-size="28" font-weight="600" fill="#196f3d">最终</text>
+    <text x="75" y="130" text-anchor="middle" font-size="10" fill="#999">浏览器视觉接近 PSD</text>
+    <text x="75" y="160" text-anchor="middle" font-size="20" fill="#196f3d" font-weight="600">✓ 不溢出</text>
+  </g>
+
+  <!-- Bottom note -->
+  <text x="450" y="320" text-anchor="middle" font-size="12" fill="#666">
+    实测案例：兑奖 PSD 「消耗99兑换币」按钮内文本，bbox = 200×26
+  </text>
+  <text x="450" y="340" text-anchor="middle" font-size="11" fill="#999">
+    raw 17.5  →  scale 修正 28  →  纵向兜底 22.1px  →  浏览器单行显示，按钮完美居中
+  </text>
+</svg>
