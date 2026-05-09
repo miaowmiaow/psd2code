@@ -1,0 +1,9 @@
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local test artifacts
+output/
+*.log
+.DS_Store
