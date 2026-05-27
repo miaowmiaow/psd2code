@@ -29,17 +29,26 @@ from core.extract.layer_exporter import LayerExporter  # noqa: E402
 class PSDToHTMLConverter:
     """PSD → HTML 转换器"""
 
-    def __init__(self, psd_path: str, smart_merge: bool = True):
+    def __init__(self, psd_path: str, smart_merge: bool = True,
+                 image_layer_flatten_enabled: bool = False):
         """
         Args:
             psd_path: PSD 文件路径
-            smart_merge: 是否启用「智能合图」。False 时全链路 4 类合图都关闭：
-                (1) LayerExporter._can_merge_group / _can_merge_group_non_text
-                (2) LayerExporter._merge_background_layers（画布底部连续背景）
-                (3) LayoutOptimizer 步骤 1.2 ImageLayerFlatten
-                (4) LayoutOptimizer DOMRestructure 多 url 内联合成 +
-                    background_flatten 文本兜底
-                对应新入口 CLI 的 ``--no-smart-merge``。
+            smart_merge: 是否启用「多 url 背景内联合成」。
+                False 时关闭以下 HTML 后处理合图：
+                (1) LayoutOptimizer DOMRestructure 多 url 内联合成
+                (2) background_flatten 文本兜底
+                对应 CLI 的 ``--no-smart-merge``。这两项合图不删除 DOM 子节点，
+                只是把容器的多 url 背景合成单图，副作用小，默认开启。
+
+                注意：解析阶段 (LayerExporter) 已不再做任何"装饰性合图"，
+                1 PSD 图层 = 1 layer_info（叶图层）或 group_info（组），
+                此开关不影响解析阶段。
+            image_layer_flatten_enabled: 是否启用 ImageLayerFlatten（步骤 1.2）。
+                默认 False。该 transformer 会把容器内 N 个 image 子合成为单张 PNG
+                并删除全部子 DOM，过于粗暴，多数业务场景下负面影响远大于收益，
+                因此 2026-05-27 起默认关闭。需要时通过 CLI
+                ``--enable-image-layer-flatten`` 或本参数显式打开。
         """
         self.psd_path: str = psd_path
         self.psd: PSDImage = PSDImage.open(psd_path)  # type: ignore[misc]
@@ -48,6 +57,7 @@ class PSDToHTMLConverter:
         self.layer_exporter: LayerExporter | None = None
         self.html_generator: HTMLGenerator | None = None
         self.smart_merge: bool = smart_merge
+        self.image_layer_flatten_enabled: bool = image_layer_flatten_enabled
 
     # -------------------------------------------------------------------------
     # 主入口
@@ -108,7 +118,7 @@ class PSDToHTMLConverter:
         """初始化导出器和生成器"""
         psd_name = Path(self.psd_path).stem
         self.layer_exporter = LayerExporter(
-            self.psd, self.output_dir, smart_merge=self.smart_merge
+            self.psd, self.output_dir
         )
         self.html_generator = HTMLGenerator(
             self.psd.width, self.psd.height, self.output_dir, psd_name
@@ -154,16 +164,17 @@ class PSDToHTMLConverter:
 
             css_rules = parse_css_to_dict(css_content)
             css_header = extract_global_css_header(css_content)
-            # smart_merge=False：关闭 LayoutOptimizer 链路两项合图
+            # smart_merge=False：关闭 LayoutOptimizer 链路的「多 url 背景内联合成」
             #  - DOMRestructure 多 url 背景内联合成（由 images_dir=None 跳过）
-            #  - ImageLayerFlatten（步骤 1.2；由 FlattenConfig(enabled=False) 跳过）
+            # ImageLayerFlatten（步骤 1.2）由独立开关 image_layer_flatten_enabled
+            # 控制，默认 False（过于粗暴，2026-05-27 起默认关闭）。
             from targets.html.postprocess.layout_optimizer.transformers.image_layer_flatten import (  # type: ignore
                 FlattenConfig,
             )
             html_optimized, css_optimized, stats = optimize_layout(
                 html_content, css_rules, global_header=css_header,
                 images_dir=(Path(html_path).parent / 'images') if self.smart_merge else None,
-                flatten_config=FlattenConfig(enabled=self.smart_merge),
+                flatten_config=FlattenConfig(enabled=self.image_layer_flatten_enabled),
             )
 
             # 写出优化版文件

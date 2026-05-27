@@ -10,7 +10,7 @@
 从"绝对定位的图层集合"→"语义化、Flex 化、可读、可复用的 HTML/CSS"：
 
 - **DOM 重构**：按空间包含关系 + 行/列聚类调整父子结构，输出 v-row / v-col / v-stack 三类容器。
-- **图层扁平化（统一通道）**：把"容器自身 bg + 全部 image 子"的 PNG 合成单图写回容器，删除子 div + CSS。代替历史上四个分散的 merge 分支。
+- **图层扁平化（统一通道，2026-05-27 起默认关闭）**：把"容器自身 bg + 全部 image 子"的 PNG 合成单图写回容器，删除子 div + CSS。代替历史上四个分散的 merge 分支。⚠️ **默认关闭**（语义独立元素混在装饰里时会被误合并），通过 CLI `--enable-image-layer-flatten` 或 `FlattenConfig(enabled=True)` 显式启用。
 - **同质兄弟分组**：识别"平铺的同质卡片"（设计师没用父组包起来），包成 `v-list`，让下游可写 `v-for`。
 - **Flex 推断**：对剩余非 v-row/v-col 容器做 flex-col / flex-row 推断；趋势元素 → margin，非趋势元素保留 absolute；所有 flex 子元素写入 `flex-shrink: 0`。
 - **单子 wrapper 折叠**：把"内部只有 1 个子节点"的虚拟 v-row/v-col wrapper 整体替换为子节点（margin 数值合并），消除布局算法副产物。
@@ -35,21 +35,21 @@ optimize_layout(
     semantic_rename_config: SemanticRenameConfig = None,    # Step 3.7
     virtual_wrapper_rename_config: VirtualWrapperRenameConfig = None,  # Step 3.8
     position_relaxer_config: PositionRelaxerConfig = None,  # Step 3.3（唯一引入视觉差异的步骤）
-    images_dir: Path | None = None,                         # 物理 images/ 目录；用于落盘合成图
-    flatten_config: FlattenConfig = None,                   # ImageLayerFlatten 配置
+    images_dir: Path | None = None,                         # 物理 images/ 目录；用于落盘合成图；smart_merge=False 时由调用方传 None
+    flatten_config: FlattenConfig = None,                   # ImageLayerFlatten 配置（默认 FlattenConfig.enabled=False，需显式启用）
 ) -> (html_out: str, css_out: dict, stats: dict)
 ```
 
-> **与 CLI `--no-smart-merge` 的联动**：`psd_to_code.py --no-smart-merge` 把
-> `smart_merge=False` 写进 `PipelineContext`，`LayoutOptimizeStage` 读到后：
-> - `images_dir=None`（禁用 `DOMRestructure` 多 url 背景内联合成）
-> - `flatten_config=FlattenConfig(enabled=False)`（禁用 Step 1.2 `ImageLayerFlatten`）
-> - 跳过 `flatten_multi_url_backgrounds` 的文本兜底
+> **CLI 开关与 LayoutOptimizer 参数的对应关系**
 >
-> 同时 PSD 解析端的 `LayerExporter` 也会被禁用 3 条合图路径（装饰组→单 PNG /
-> 画布底部连续背景合并 / 非文本→背景图 + 文本独立），详见
-> [`../02-modules/core-extract.md`](../02-modules/core-extract.md) 的
-> "智能合图总开关" 小节。旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False)` 行为等价。
+> | CLI 开关 | ctx key | 默认 | 作用 |
+> | -------- | ------- | ---- | ---- |
+> | `--no-smart-merge` | `smart_merge=False` | `True`（默认开启） | 关闭「多 url 背景内联合成」：`LayoutOptimizeStage` 把 `images_dir=None` 传给 `DOMRestructure`，并跳过 `flatten_multi_url_backgrounds` 文本兜底 |
+> | `--enable-image-layer-flatten` | `image_layer_flatten_enabled=True` | `False`（**默认关闭**） | 启用 Step 1.2 `ImageLayerFlatten`：`LayoutOptimizeStage` 用 `FlattenConfig(enabled=True)` 构造 transformer。默认关闭原因见 Step 1.2 章节 |
+>
+> 两个开关**完全解耦**：`--no-smart-merge` 只影响多 url 背景合成（不删 DOM 子节点），`--enable-image-layer-flatten` 只控制 Step 1.2 的 ImageLayerFlatten（会删 DOM 子节点）。
+>
+> **解析阶段 (`LayerExporter`) 是纯解析版**——1 PSD 图层 = 1 layer_info / 1 PNG，本身就不做任何"装饰性合图"，所以两个开关都对解析阶段没有影响。旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False, image_layer_flatten_enabled=True)` 行为与 CLI 等价。
 
 `stats` 关键字段：
 
@@ -196,7 +196,13 @@ LayoutOptimizer.optimize():
 
 **触发原因**：dom_restructure 早期 `_cluster_row` 遇到"大底框 + N 个并列卡"这种"前景与底框 100% 纵向重叠 + X 同列"的组合时会 fallback 判 stack；等容器背景吸收 pass 把底框吸走后，本质上剩下的是真列布局，应该升级。
 
-## Step 1.2：图层扁平化（ImageLayerFlatten，2026-04-30 重构）
+## Step 1.2：图层扁平化（ImageLayerFlatten，2026-04-30 重构；2026-05-27 起默认关闭）
+
+> **⚠️ 2026-05-27 起 `FlattenConfig.enabled` 默认值改为 `False`**。本步骤会把容器内 N 个 image 子合成为单张 PNG 并删除全部子 DOM，对"含语义元素混在装饰中"的组误伤严重——典型反例：抽奖活动「游泳圈」组里"游泳圈底图(pixel) + 数字框矩形(shape) + 礼盒文字(被栅格化的 TypeLayer)"3 个语义独立元素全部满足触发条件（都是 `data-type=image` + 单 PNG + 邻接图连通 + opacity=1 + 正常 blend），被合并成单张 `flat-*.png` 后丧失独立改色 / 换文案 / 绑事件能力。
+>
+> 判定逻辑虽然检查了 `data-type=image / 单 PNG / 邻接连通` 等几何条件，**但无法识别"栅格化产物背后的语义角色"**。在加入"按子 PSD kind 混合检测 / 语义类名族系 / 子数量上限"等更严格护栏之前，默认关闭比较安全。
+>
+> 启用方法：CLI `--enable-image-layer-flatten` / `PSDToHTMLConverter(..., image_layer_flatten_enabled=True)` / 显式 `FlattenConfig(enabled=True)`。下面的章节描述的是**启用后**的行为。
 
 位置：`transformers/image_layer_flatten.py`
 
@@ -284,7 +290,7 @@ _PARENT_BLOCKING_PROPS = {
 ```python
 @dataclass
 class FlattenConfig:
-    enabled: bool = True
+    enabled: bool = False         # ⚠️ 2026-05-27 起默认关闭，需显式启用
     min_total_layers: int = 2
     max_area_ratio: float = 0.5
     max_neighbor_gap_px: int = 10
@@ -293,9 +299,10 @@ class FlattenConfig:
 
 ### 排查提示
 
-- 期望某容器被扁平化但未触发 → 看 `_can_flatten_container` 哪条返回 False：常见 `mix-blend-mode != normal`、`opacity < 1`、子 div 内部还有子节点
+- ImageLayerFlatten 整体没生效（产物 `index_optimized.html` 找不到 `flat-*.png` 引用 + 子 div 仍独立）→ 2026-05-27 起默认关闭，需要时显式 `--enable-image-layer-flatten` 或 `FlattenConfig(enabled=True)`
+- 启用后期望某容器被扁平化但未触发 → 看 `_can_flatten_container` 哪条返回 False：常见 `mix-blend-mode != normal`、`opacity < 1`、子 div 内部还有子节点
 - 期望容器被合并但有 `border-radius` → 它在 `_PARENT_BLOCKING_PROPS` 里，按设计跳过；要支持需把字段留到 PNG 之上的 div
-- 临时关闭整个 transformer：`FlattenConfig(enabled=False)`
+- 临时关闭整个 transformer：`FlattenConfig(enabled=False)`（也是当前默认）
 
 ## Step 1.5：同质兄弟分组（SiblingGroupDetector，V11）
 

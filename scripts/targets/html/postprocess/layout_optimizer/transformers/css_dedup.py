@@ -131,6 +131,8 @@ class CssDedup:
         self.stats.setdefault('background_shorthand_merged', 0)
         # Pass 1 统计：被删掉的 z-index 数
         self.stats.setdefault('z_index_pruned', 0)
+        # Pass 1.5 统计：混合状态下被补/改写的 z-index 数
+        self.stats.setdefault('z_index_filled', 0)
         # Pass 2 统计：被合并的规则条数（节省条数）
         self.stats.setdefault('css_rules_merged', 0)
         # Pass 2 输出：[[selector, ...], ...] 同组选择器列表（顺序内排序）
@@ -245,41 +247,72 @@ class CssDedup:
         except (ValueError, TypeError):
             return None
 
+    def _has_z_descendant(self, element) -> bool:
+        """递归检查 element 的子树是否包含任意带数字 z-index 的后代。
+
+        ⚠️ 用于探测"祖先穿透"风险：当某个 ``z-index: auto`` 子的内部存在
+        带数字 z 的后代时，由于 auto 不建立 stacking context，该后代的
+        z 数字会"穿透"到再上层与外层兄弟比较。
+        典型反例（魔界人幸运签 H5 canvas）：
+          ``.bg`` (v-stack, auto) 内含 ``.img-2-2-col`` (z=10)
+          → 10 穿透到 #canvas 层级，反盖兄弟 ``.group-4-3`` (auto)。
+        """
+        for desc in element.find_all(recursive=True):
+            cls = self._first_class(desc)
+            if not cls:
+                continue
+            sel = f'.{cls}'
+            if self._read_z(sel) is not None:
+                return True
+        return False
+
     def _prune_z_index(self) -> None:
-        """删除"DOM 顺序与 z 序天然一致"的容器内全部子 z-index。
+        """删除"DOM 顺序与 z 序天然一致"的容器内全部子 z-index；
+        或在出现"混合状态"（部分子带数字 z + 部分子 auto，或某 auto 子的
+        后代含带 z 元素）时，给 auto 兄弟补 z-index 兜底，保证视觉与
+        DOM 顺序一致。
 
-        策略（仅在 100% 安全时删除）：
-          收集容器内所有直接子元素的 (selector, z) 序列：
-            - 全部子都有显式 z-index（无 None）且严格递增（按 DOM 顺序）
-              → DOM 顺序天然实现叠序 → 全删
-            - 否则（任何一个子没有 z-index / 出现倒挂 / 仅有部分子带 z）
-              → 全部保留
+        三种处理：
+          A. 全部子都有显式 z-index 且按 DOM 顺序严格递增
+             → DOM 顺序天然实现叠序 → 全删（v-* wrapper 除外）
+          B. 全部子都 auto（无 z）且 **无任何后代带 z**
+             → 无需处理（浏览器按 DOM 顺序绘制，天然正确）
+          C. 混合状态 —— ⚠️ 危险区，触发兜底补 z：
+             c1. 直接子部分带 z + 部分 auto
+             c2. 直接子全 auto，但某个子的**后代**含带数字 z 元素
+                 （后代 z 穿透 auto 祖先，与外层兄弟错位比较）
 
-        为什么必须"全部子都有 z 才能删"
-        --------------------------------
+        为什么混合状态必须补 z（Pass 1.5 兜底）
+        ----------------------------------------
         CSS 层叠规则下，positioned 元素带数字 ``z-index`` 与带 ``auto``
         的兄弟**不在同一栈层**：带数字 z（即便 z=1）的兄弟会**始终**绘制
-        在 ``z-index: auto`` 兄弟之上，与 DOM 顺序无关。因此只要兄弟里有
-        一个 z 是 None（=> CSS 输出后为 auto），就**不能**删另一个兄弟
-        的 z-index：
+        在 ``z-index: auto`` 兄弟之上，与 DOM 顺序无关。
 
-        典型反例（南瓜大作战 H5 canvas 直接子）：
-          ``[bg__1 z=1, img__2 z=2, slogan__18 z=18, ...]``
-          上游 transformer 把 bg__1 之外的 z-index 都擦成了 None
-          （None 经 dict_to_css 输出会缺 z-index，浏览器按 auto 处理）。
-          若再把 bg__1 的 z=1 也删掉，看起来"无差异"，但若**保留** bg__1
-          的 z=1 而其他兄弟为 auto，bg__1 就会盖住所有兄弟。这种情况下
-          唯一安全做法是要么所有兄弟都带 z 且 DOM 单调（可全删），要么
-          都不动（保留 bg__1 的 z=1 是错的，但删它也是错的——根因在上游
-          擦 z 的 transformer，本 Pass 不应擅自补救）。
+        典型反例（魔界人幸运签 H5 canvas 直接子）：
+          DOM 序：[img-2 auto, bg z=10, group z=41, group-2-2 auto,
+                   group-3-3 auto, group-4-3 auto, ding auto, group-5 auto]
+          原 PSD：[img__1 z=1, bg__11 z=11, group__17 z=17, group-2__52 z=52,
+                   group-3__60 z=60, group-4__87 z=87, ding__97 z=97, group-5__100 z=100]
+          单调 ✓ 本应全删。但上游 cluster bg 修正循环把 bg/group 的 z 改成 10/41
+          且未同步擦除，导致它们成为"残留带 z"的兄弟。其余兄弟在某处被擦成 auto
+          → 浏览器中 .bg(z=10) 反盖到 .group-4-3(auto) 之上 → 大背景图盖住卡片。
+          正确做法：检测到混合后，按 DOM 顺序为所有兄弟补 z-index，保留原 z 顺序
+          关系，且使序列严格递增。
         """
+        # 两轮扫描的必要性
+        # ------------------
+        # c1（直接子混合）会给 auto 子补 z 数值；这些新 z 会让外层祖先的
+        # ``_has_z_descendant`` 探测返回 True。因此 c2（直接子全 auto + 后代
+        # 有 z）必须在 c1 全部完成后再扫一遍，才能发现"穿透"风险。
         pruned = 0
+        filled = 0
+
+        # ----- Pass 1：处理直接子带 z 的容器（Case A / Case C c1）-----
         for parent in self.soup.find_all():
             children = list(parent.find_all(recursive=False))
             if not children:
                 continue
 
-            # 收集每个子的 (selector, z)
             seq: List[Tuple[Optional[str], Optional[int]]] = []
             for c in children:
                 cls = self._first_class(c)
@@ -287,15 +320,23 @@ class CssDedup:
                 z = self._read_z(sel) if sel else None
                 seq.append((sel, z))
 
-            # 必须全部子都有 z-index，否则删任何一个都会破坏栈层
-            # （带数字 z 的兄弟总是在 z-index:auto 兄弟之上）
-            if any(z is None for _, z in seq):
+            n_with_z = sum(1 for _, z in seq if z is not None)
+            n_total = len(seq)
+
+            # Pass 1 跳过：直接子全 auto（留给 Pass 2 处理 c2）
+            if n_with_z == 0:
                 continue
 
-            # 全部带 z，再检查是否严格递增
+            # Case C c1: 混合状态（部分带 z + 部分 auto）—— 兜底补 z
+            if n_with_z < n_total:
+                filled += self._fill_z_index_mixed(seq)
+                continue
+
+            # Case A: 全部带 z，检查是否严格递增
             monotonic = True
             prev: Optional[int] = None
             for _, z in seq:
+                assert z is not None
                 if prev is not None and z <= prev:
                     monotonic = False
                     break
@@ -320,7 +361,84 @@ class CssDedup:
                 if rule and 'z-index' in rule:
                     del rule['z-index']
                     pruned += 1
+
+        # ----- Pass 2：处理直接子全 auto 但后代含 z 的容器（Case C c2）-----
+        # 必须在 Pass 1 完成后做：Pass 1 给子补的新 z 会让外层
+        # _has_z_descendant 返回 True，从而发现穿透风险。
+        for parent in self.soup.find_all():
+            children = list(parent.find_all(recursive=False))
+            if not children:
+                continue
+
+            seq2: List[Tuple[Optional[str], Optional[int]]] = []
+            for c in children:
+                cls = self._first_class(c)
+                sel = f'.{cls}' if cls else None
+                z = self._read_z(sel) if sel else None
+                seq2.append((sel, z))
+
+            n_with_z2 = sum(1 for _, z in seq2 if z is not None)
+            # 只关心"直接子全 auto"的容器（其它形态在 Pass 1 已处理）
+            if n_with_z2 != 0:
+                continue
+            # 探测后代是否含 z（穿透风险）
+            if not any(self._has_z_descendant(c) for c in children):
+                continue
+            filled += self._fill_z_index_mixed(seq2)
+
         self.stats['z_index_pruned'] = pruned
+        self.stats['z_index_filled'] = filled
+
+    def _fill_z_index_mixed(self, seq: List[Tuple[Optional[str], Optional[int]]]) -> int:
+        """混合状态下按 DOM 顺序为所有兄弟补/调整 z-index。
+
+        ⚠️ **核心目标：消除"数字 z 兄弟 + auto 兄弟"的混合状态。**
+        positioned 元素带数字 ``z-index`` 始终在 ``z-index: auto`` 兄弟之上
+        （与 DOM 顺序无关），所以一旦发现混合，**所有**兄弟（含 v-* wrapper）
+        都必须显式有 z-index，才能让 DOM 顺序兜底视觉叠序。
+
+        策略：
+          沿 DOM 顺序遍历，维护 cursor（严格递增）：
+            - 已有 z 且 z > cursor → 保留原 z，cursor = z
+            - 已有 z 但 z <= cursor → **保留原 z**（v-* / 普通子均如此）；
+              cursor 取 max(cursor, z)，确保后续兄弟 z 都更大
+            - 无 z（auto） → 分配 cursor + 1，**写回 css_rules**（含 v-*）
+
+        为什么 v-* 也必须写入 z：
+          v-* wrapper（v-stack/v-col/v-row）若保持 auto，会被同容器里
+          带数字 z 的普通兄弟反盖到下方。典型反例：
+          parent.children = [v-stack(auto), bg(z=10)] → bg 永远在 v-stack 上。
+          但 DOM 顺序上 bg 在 v-stack 之后，本意是"bg 在 v-stack 之上"——
+          DOM 顺序与 z 数字恰巧吻合，所以视觉无碍。
+          反例：parent.children = [v-stack(auto), bg(z=10), card(auto)]
+          → bg 永远在 card 之上，但 DOM 上 card 在 bg 之后，本意"card 在 bg 之上"
+          → 视觉错位。补 z 后变成 [v-stack(z=0), bg(z=10), card(z=11)] → 正确。
+
+        为什么已有 z 都保留原值不下调：
+          上游 LayoutOptimizer / cluster bg 修正循环故意分配的 z 表达了
+          视觉叠序关系；若下调会破坏跨"非直接兄弟"的视觉一致性。
+
+        返回值：本次新增/修改的字段数。
+        """
+        modified = 0
+        cursor = -1
+        for sel, z in seq:
+            if sel is None:
+                cursor += 1
+                continue
+            if z is not None:
+                # 保留原 z；cursor 跟随推进
+                cursor = max(cursor, z)
+                continue
+            # 无 z（auto）→ 必须补一个 z 值（含 v-* wrapper）
+            target = cursor + 1
+            cursor = target
+            rule = self.css_rules.get(sel)
+            if rule is None:
+                continue
+            rule['z-index'] = str(target)
+            modified += 1
+        return modified
 
     @staticmethod
     def _is_virtual_wrapper_selector(sel: str) -> bool:

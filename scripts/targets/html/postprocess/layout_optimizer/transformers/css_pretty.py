@@ -327,6 +327,34 @@ class CssPretty:
             break
         return "\n".join(lines[i:])
 
+    @classmethod
+    def _strip_top_canvas_block(cls, header: str) -> str:
+        """剥掉 ``global_header`` 中的"顶层 ``#canvas { ... }`` 块"。
+
+        仅剥**顶层**的 ``#canvas { ... }``（紧贴左边距、无嵌套），不动
+        ``@media (...) { #canvas { ... } }`` 内部的 ``#canvas``。
+
+        用于 ``file_skeleton=False`` 模式：拼回 ``global_header`` 的同时把旧
+        ``#canvas`` 剥除，再追加最终态 ``css_rules['#canvas']``，避免重复定义。
+        """
+        if not header:
+            return header
+        out: List[str] = []
+        blocks = cls._split_top_level(header)
+        # _split_top_level 只识别"selector { ... }"块，不会包含纯注释/空白；
+        # 我们需要保留原始行序、注释、空行。改为：用 split_top_level 找出
+        # #canvas 块的字面 substring，再 string.replace 一次。
+        for sel, full in blocks:
+            if sel.strip() == '#canvas':
+                # 直接从 header 删掉这个完整 block 的字面文本（首次出现）。
+                idx = header.find(full)
+                if idx >= 0:
+                    header = header[:idx] + header[idx + len(full):]
+                break  # 顶层应只有一个 #canvas
+        # 清理可能因删除产生的连续多空行
+        header = re.sub(r'\n{3,}', '\n\n', header)
+        return header
+
     # ------------------------------------------------------------------
     # Pass 1：文件骨架
     # ------------------------------------------------------------------
@@ -339,13 +367,27 @@ class CssPretty:
         ``#canvas`` 优先用 ``css_rules['#canvas']`` 渲染（已被 LayoutOptimizer
         修改的最终态）；如果不在 css_rules，再回落到 global_header 中的版本。
 
-        若 ``file_skeleton`` 关闭，直接原样返回 ``global_header``（剔除文件
+        若 ``file_skeleton`` 关闭，原样返回 ``global_header``（剔除文件
         头部纯标识注释，如 ``/* PSD2HTML v1.1.0 ... */`` —— 这类版本/作者
         标识对开发者无价值，与"section_comments=False 想要的无注释观感"
-        语义一致）。
+        语义一致）；同时把 ``css_rules['#canvas']`` 的最终态追加在末尾
+        （``global_header`` 内的旧 ``#canvas`` 块会被先剥除，避免重复）。
         """
         if not self.config.file_skeleton:
-            return self._strip_top_marker_comments(self.global_header).rstrip() + "\n"
+            header_clean = self._strip_top_marker_comments(self.global_header)
+            # 剥除 global_header 中的旧 #canvas 块（保留 @media 中的不动），
+            # 避免与最终态 css_rules['#canvas'] 重复定义。
+            header_clean = self._strip_top_canvas_block(header_clean)
+            head = header_clean.rstrip()
+            # 追加最终态 #canvas（含 LayoutOptimizer 可能的修改）。这是关键：
+            # css_rules['#canvas'] 是 LayoutOptimizer 看到的最终态，必须输出。
+            # 在 file_skeleton=True 模式下由"段3：画布"输出；这里是 False 分支
+            # 的对偶补全。
+            if canvas_rule:
+                if head:
+                    head += "\n\n"
+                head += self._render_rule('#canvas', canvas_rule)
+            return head.rstrip() + "\n"
 
         # 切分顶层块
         blocks = self._split_top_level(self.global_header)

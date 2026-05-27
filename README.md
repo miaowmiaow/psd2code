@@ -1,3 +1,5 @@
+> 🌐 **Language / 语言**：**简体中文** | [English](./README_EN.md)
+
 ---
 
 ## 一、为什么不用现成的 PSD 转 HTML 工具？
@@ -92,7 +94,8 @@ python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --target vue
 | `--target {html,react,vue}` | `html` | 选择产物形态 |
 | `--css-style {compact,expanded}` | `compact` | 优化版 CSS 输出风格：`compact` 接近手写、`expanded` 全展开 + PSD 坐标溯源注释 |
 | `--no-css-pretty` | 关闭 | 关闭 CSS 美化，回到字母序机械渲染（CI 基线对比常用） |
-| `--no-smart-merge` | 关闭 | **一键关闭全部 4 类智能合图**：装饰组合并为单 PNG / 画布底部连续背景合并 / LayoutOptimizer 图层扁平化 / CSS 多 url 背景内联合成。**每个 PSD 图层保留独立 DOM + CSS 规则**，便于 1:1 逐层诊断 |
+| `--no-smart-merge` | 关闭 | 关闭 LayoutOptimizer 链路的「多 url 背景内联合成」（DOMRestructure 内联 + `background_flatten` 文本兜底）。这两项合图只是把同一容器的多 url 背景合成单图、**不删除任何 DOM 子节点**，副作用小，因此默认开启；加该参数后每条 `background-image: url(a), url(b), ...` 保持原样，便于 1:1 逐层诊断 |
+| `--enable-image-layer-flatten` | 关闭 | 显式启用 LayoutOptimizer Step 1.2 `ImageLayerFlatten`：把容器内 N 个 image 子合成单张 PNG 并**删除所有子 DOM 节点**。**默认关闭**（2026-05-27 起），因为它会把语义独立的栅格化元素（按钮 / 数字框 / 被栅格化的 TypeLayer）和真正的装饰像素一起合并，丧失 DOM 可访问性。仅在确认整组是纯装饰时启用 |
 
 举例：
 
@@ -110,17 +113,24 @@ python3 .codebuddy/skills/psd2code/psd_to_code.py 南瓜大作战.psd --target v
 cd output/南瓜大作战/vue
 npm install && npm run dev    # http://localhost:5173
 
-# 关闭全部智能合图，每个 PSD 图层保留独立 DOM / CSS 规则（1:1 诊断用）
+# 关闭多 url 背景内联合成，保持原始多 url CSS（1:1 诊断用）
 python3 .codebuddy/skills/psd2code/psd_to_code.py 南瓜大作战.psd --no-smart-merge
+
+# 显式启用 ImageLayerFlatten（默认关闭，2026-05-27 起）
+python3 .codebuddy/skills/psd2code/psd_to_code.py 南瓜大作战.psd --enable-image-layer-flatten
 ```
 
-> **`--no-smart-merge` 到底关了什么？** 4 类合图一次性全关：
-> 1. **装饰组合并为单 PNG**（`LayerExporter._can_merge_group` / `_can_merge_group_non_text`）——组内全装饰图层默认会被合成一张 PNG。
-> 2. **画布底部连续背景合并**（`LayerExporter._merge_background_layers`）——底部若干张全屏背景默认合成一张大背景图。
-> 3. **LayoutOptimizer 图层扁平化**（`ImageLayerFlatten`，Step 1.2）——"容器自身 bg + 全部 image 子"默认按 z 序合成单 PNG 写回容器。
-> 4. **CSS 多 url 背景内联合成**（`DOMRestructure` 内联 + `background_flatten` 文本兜底）——多 url 背景默认被 PIL `alpha_composite` 合成 `flat-*.png`。
+> **`--no-smart-merge` 到底关了什么？** 仅 LayoutOptimizer 链路的两项「多 url 背景合成」：
+> 1. **DOMRestructure 多 url 背景内联合成**——容器内多张装饰背景层默认会被 `compose_layers` 合成一张 `flat-*.png` 写到容器的 `background-image`。
+> 2. **`background_flatten` 文本兜底**——主路径漏掉的多 url 背景在最后通过 CSS 文本扫描再合成一次。
 >
-> 典型场景：某张切图不对、想 1:1 对照 PSD 图层树、或跑像素级回归基线时启用。**新旧两条入口**（`psd_to_code.py` CLI / `PSDToHTMLConverter(psd_path, smart_merge=False)` Python API）都支持这个开关。
+> 这两项**不删除任何 DOM 子节点**、不影响 DOM 结构，副作用很小，因此默认开启；只有想 1:1 对照 PSD 图层树或跑像素级回归基线时再关掉。
+>
+> **解析阶段 (`LayerExporter`) 已不再做任何"装饰性合图"**——1 PSD 图层 = 1 layer_info / 1 PNG，`--no-smart-merge` 对解析阶段没有任何影响。
+>
+> **`ImageLayerFlatten` 默认关闭**（2026-05-27 起）：它会把容器内 N 个 image 子合成单张 PNG **并删除全部子 DOM**，过于粗暴——典型反例：抽奖活动「游泳圈」组里 `游泳圈底图 + 数字框矩形 + 礼盒文字`（3 个语义独立元素）会被合并成单张 `flat-*.png`，无法独立改色 / 换文案 / 绑事件。需要时通过 `--enable-image-layer-flatten` 显式启用。
+>
+> **新旧两条入口**（`psd_to_code.py` CLI / `PSDToHTMLConverter(psd_path, smart_merge=False, image_layer_flatten_enabled=True)` Python API）都支持上述开关。
 
 ### 3.4 产物目录速查
 
@@ -366,7 +376,11 @@ images/<semantic-tag>-<md5前6位>.png
 
 一个与 CSS 规范相反的坑：**`background-image: url(a), url(b)` 中第一个 url 在视觉最上层**，而 PIL `alpha_composite` 期望"底层在前"。调用方必须 reverse 列表——早期代码漏掉 reverse 导致所有合成图的颜色上下层叠错，颜色"对调"。
 
-### 5.5 图层扁平化：子图合并 + 父容器吸收
+### 5.5 图层扁平化：子图合并 + 父容器吸收（默认关闭）
+
+> **⚠️ 2026-05-27 起 `ImageLayerFlatten` 默认关闭**（`FlattenConfig.enabled = False`）。下面描述的优化逻辑仍然存在于代码中，需要时通过 CLI `--enable-image-layer-flatten` 或 `PSDToHTMLConverter(..., image_layer_flatten_enabled=True)` 显式启用。
+>
+> **关闭原因**：判定虽然检查了 `data-type=image / 单 PNG / 邻接连通` 等几何条件，但**无法识别"栅格化产物背后的语义角色"**。典型反例：抽奖活动「游泳圈」组里 `游泳圈底图(pixel) + 数字框矩形(shape) + 礼盒文字(被栅格化的 TypeLayer)` 这 3 个语义独立元素会被合并成单张 `flat-*.png`，丧失独立改色 / 换文案 / 绑事件的能力。在无法可靠识别"纯装饰组"之前，默认关闭比较安全。
 
 更激进的优化：当一个容器里**只有纯 image 子图层**（无文本、无按钮），把容器自身的 background + 所有 image 子按 z 序合成单张 PNG、删掉所有子 div 及其 CSS 规则、只留容器自己的 `background-image`。
 
@@ -392,7 +406,7 @@ images/<semantic-tag>-<md5前6位>.png
 ```mermaid
 flowchart TD
     A["原始 absolute HTML"] --> B["Step 1：DOM 重构<br/>(聚类 / 背景剥离 / 容器吸收)"]
-    B --> C["Step 1.2：图层扁平化<br/>(多 image 子 → 单张合成 PNG)"]
+    B --> C["Step 1.2：图层扁平化<br/>(多 image 子 → 单张合成 PNG)<br/>⚠ 默认关闭"]
     C --> D["Step 1.5：同质兄弟分组<br/>(识别 v-list，支持 v-for)"]
     D --> E["Step 2：Flex 推断<br/>(analyzer V10 + 三道闸门)"]
     E --> F["Step 2.5：单子 wrapper 折叠<br/>(消除中间层)"]
@@ -620,9 +634,10 @@ $ python3 psd_to_code.py "南瓜大作战 H5.psd" --target html
    - z-index 精简: 304 处
    - CSS 等价规则合并: 节省 128 条
    - 重复元素抽取: 25 组 → 删除 49 个 hash 类、复用到 61 个元素
-   - 图层扁平化: 47 个容器 (共合并 105 层, 节省 45.6 KB)
 ✅ 产物：output/南瓜大作战 H5/html/
 ```
+
+> 上面的日志摘自 2026-04 基线。**2026-05-27 起 `ImageLayerFlatten` 默认关闭**，所以现在跑同一 PSD 不会再有"图层扁平化: 47 个容器"那行；如想看历史效果，加 `--enable-image-layer-flatten` 即可复现。
 
 **浏览器打开 `index.html` 第一屏**——和 PSD 设计稿完全像素对齐，包括 solgan 上的描边发光、用户信息区的圆角、糖果图标的渐变叠加：
 
@@ -650,7 +665,6 @@ $ python3 psd_to_code.py "南瓜大作战 H5.psd" --target html
 转换日志里有几个有意思的点：
 
 - **组级效果溢出自动触发 3 次**：solgan 日期组（6px）、副标题组（10px）、糖果数目组（4px）——全部走"手动栅格化 + composite 混合"。
-- **47 个容器被图层扁平化**：原本 105 张 image 合并成 47 张 PNG，节省 45.6 KB。
 - **3 组同质兄弟列表识别**：道具卡 × 6、任务卡 × 12、排行榜条目 × 6，被包成 `v-list`——可直接写 `v-for`。
 - **叠图组识别**：邀请助力 / 核销助力码 / 版块3（7 个图层）等被 V8/V9 闸门正确识别为"装饰堆叠"，保持 absolute。
 

@@ -1,21 +1,15 @@
 # -*- coding: utf-8 -*-
-"""图层导出决策链 —— Chain of Responsibility。
+"""图层导出决策链 —— Chain of Responsibility（纯解析版）。
 
-原 `LayerExporter.export_layers` 内部有一段 ~150 行的 if/elif 分支，
-负责判断一个 item 是"剪切蒙版组 / 按钮组 / 可合并组 / 普通组 / 叶图层"
-中的哪一种，并决定合并策略。
+每个 PSD 图层一一映射到一个 layer_info（叶图层）或 group_info（组）。
+解析阶段不做任何"装饰性合图"——一图层 = 一 div = 一 PNG。
 
-把这段分支提炼成一系列 Handler，每个 handler 负责单一决策：
-- 先调用 can_handle(ctx) 判断是否适用
-- 若适用，调用 handle(ctx) 返回 0..N 个 layer_info，并告知是否已"吃掉"输入
+唯一的例外是 PSD 原生剪贴蒙版语义：
+- base 是普通图层 + clipping=1 的 layer 列表 → 必须烧成单图（CSS 无法等价还原）
+- base 是组 + clipping=1 的 layer → clipped 用 base group alpha/矩形 剪裁后独立导出
 
-这样：
-- 每条决策分支独立可测、可替换
-- 新增一种合并策略只需加一个 Handler 并 register
-- LayerExporter.export_layers 退化为"run handlers in order"
-
-handler **不持有状态**，所有副作用（_z_counter、exported_count、打印）
-仍走 LayerExporter.* 方法本身。不破坏既有混合渲染与子组 composite 约束。
+这两种处理由 `_merge_clipping_group` / `_export_clipped_layer_against_group_base`
+完成，是 PSD 像素语义的还原，不是"为了减少 DOM 节点而合图"。
 """
 
 from __future__ import annotations
@@ -39,7 +33,6 @@ class HandlerContext:
     parent_left: int
     parent_top: int
     parent_clip_bbox: Optional[tuple[int, int, int, int]]
-    bg_layer_ids: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -69,23 +62,8 @@ class LayerHandler(ABC):
 # ------------------------------------------------------------------
 
 
-class BackgroundSkipHandler(LayerHandler):
-    """顶层已合并过的背景图层直接跳过。"""
-
-    def can_handle(self, ctx: HandlerContext) -> bool:
-        if not ctx.bg_layer_ids:
-            return False
-        if isinstance(ctx.item, tuple):
-            return id(ctx.item[0]) in ctx.bg_layer_ids
-        return id(ctx.item) in ctx.bg_layer_ids
-
-    def handle(self, ctx: HandlerContext) -> HandlerResult:
-        # 不产出，也不再继续
-        return HandlerResult(produced=[], handled=True)
-
-
 class ClippingGroupHandler(LayerHandler):
-    """剪切蒙版组：base_layer + 多个 clipped_layers。"""
+    """剪切蒙版组：base_layer + 多个 clipped_layers（PSD 原生语义）。"""
 
     def can_handle(self, ctx: HandlerContext) -> bool:
         return isinstance(ctx.item, tuple)
@@ -101,6 +79,12 @@ class ClippingGroupHandler(LayerHandler):
 
         base_name = base_layer.name or 'merged'
 
+        # 过滤隐藏 / 透明的 clipped 层
+        clipped_layers = [
+            cl for cl in clipped_layers
+            if cl.visible and cl.opacity > 0
+        ]
+
         # 隐藏/透明 base → 跳过整组
         if not base_layer.visible:
             exp.skipped_count += 1 + len(clipped_layers)
@@ -111,34 +95,28 @@ class ClippingGroupHandler(LayerHandler):
             print(f"{'  ' * depth}🚫 {base_name} (opacity=0剪切蒙版组，已跳过)")
             return HandlerResult(handled=True)
 
+        # 所有 clipped 都被隐藏 → 仅处理 base
+        if not clipped_layers:
+            if base_layer.is_group():
+                inner_ctx = HandlerContext(
+                    exporter=exp, item=base_layer, depth=depth,
+                    parent_name=parent_name, parent_left=parent_left,
+                    parent_top=parent_top,
+                    parent_clip_bbox=parent_clip_bbox,
+                )
+                return GroupHandler().handle(inner_ctx)
+            li = exp._export_single_layer(
+                base_layer, base_name,
+                f'{parent_name}/{base_name}' if parent_name else base_name,
+                depth, parent_left, parent_top, clip_bbox=parent_clip_bbox,
+            )
+            return HandlerResult(produced=[li] if li else [], handled=True)
+
         produced: list[dict[str, Any]] = []
         full_name = f'{parent_name}/{base_name}' if parent_name else base_name
 
-        # base 是组：先试合并，否则递归
+        # base 是组：组本身递归导出，clipped 层用 base group alpha 剪裁后独立导出
         if base_layer.is_group():
-            can_merge = exp._can_merge_group(base_layer)
-
-            if can_merge:
-                merged = exp._merge_group_as_single_image(
-                    base_layer, base_name, full_name,
-                    depth, parent_left, parent_top,
-                    clip_bbox=parent_clip_bbox,
-                )
-                if merged:
-                    produced.append(merged)
-                    for cl in clipped_layers:
-                        cl_name = cl.name or 'clipped'
-                        cl_full = f'{parent_name}/{cl_name}' if parent_name else cl_name
-                        li = exp._export_single_layer(
-                            cl, cl_name, cl_full, depth,
-                            parent_left, parent_top, clip_bbox=parent_clip_bbox,
-                        )
-                        if li:
-                            produced.append(li)
-                    return HandlerResult(produced=produced, handled=True)
-                print(f"{'  ' * depth}  ⚠️  合并失败，回退到逐层导出")
-
-            # 回退：递归处理组
             print(f"{'  ' * depth}📁 {base_name} (组，有剪切蒙版附着)")
 
             grp_abs_left = base_layer.left
@@ -169,15 +147,17 @@ class ClippingGroupHandler(LayerHandler):
             for cl in clipped_layers:
                 cl_name = cl.name or 'clipped'
                 cl_full = f'{parent_name}/{cl_name}' if parent_name else cl_name
-                li = exp._export_single_layer(
-                    cl, cl_name, cl_full, depth,
-                    parent_left, parent_top, clip_bbox=parent_clip_bbox,
+                # 用 base group composite alpha/矩形 剪裁 clipped layer，
+                # 避免输出 PSD 视觉中"看不见"的整张大色块
+                li = exp._export_clipped_layer_against_group_base(
+                    cl, base_layer, cl_name, cl_full, depth,
+                    parent_left, parent_top,
                 )
                 if li:
                     produced.append(li)
             return HandlerResult(produced=produced, handled=True)
 
-        # base 是普通图层：合并剪切
+        # base 是普通图层：合并剪切（PSD 原生语义，CSS 无法等价还原）
         merged = exp._merge_clipping_group(
             base_layer, clipped_layers,
             parent_name, depth,
@@ -228,7 +208,17 @@ class InvisibleLayerHandler(LayerHandler):
 
 
 class GroupHandler(LayerHandler):
-    """普通组（非剪切蒙版）：先试 composite 合并，否则递归。"""
+    """普通组（非剪切蒙版）：用 PSD 原生合成簇决策合图策略。
+
+    决策由 `compose_cluster.decide_group_merge()` 给出，基于 PSD 自身的硬性
+    合成语义（剪贴蒙版 / 非 NORMAL 混合 / PASS_THROUGH 子组 / 调整层）：
+
+    - merge_full           → 整组合成单图
+    - merge_with_text_kept → 非文本合成为背景，文本独立保留可访问性
+    - merge_partial        → 仅"glued cluster"合成（每个 cluster 一张），
+                              singleton independent cluster 保留独立递归
+    - no_merge             → 完全递归处理
+    """
 
     def can_handle(self, ctx: HandlerContext) -> bool:
         if isinstance(ctx.item, tuple):
@@ -243,45 +233,45 @@ class GroupHandler(LayerHandler):
         depth = ctx.depth
         parent_left = ctx.parent_left
         parent_top = ctx.parent_top
-        parent_clip_bbox = ctx.parent_clip_bbox
 
-        produced: list[dict[str, Any]] = []
+        from .compose_cluster import decide_group_merge, describe_decision
 
-        can_merge = exp._can_merge_group(layer)
+        decision = decide_group_merge(layer)
+        print(f"{'  ' * depth}📁 {layer_name} → {describe_decision(decision)}")
 
-        if can_merge:
+        # ── 路径 1: merge_full —— 整组合成单图 ────────────────────────────
+        if decision.action == "merge_full":
             merged = exp._merge_group_as_single_image(
-                layer, layer_name, full_name,
-                depth, parent_left, parent_top,
-                clip_bbox=parent_clip_bbox,
+                layer, layer_name, full_name, depth, parent_left, parent_top,
             )
             if merged:
-                produced.append(merged)
-                return HandlerResult(produced=produced, handled=True)
-            print(f"{'  ' * depth}📁 {layer_name} (合并失败，回退逐层导出)")
+                return HandlerResult(produced=[merged], handled=True)
+            print(f"{'  ' * depth}  ⚠️  merge_full 失败，回退逐层导出")
+            # 失败 fallthrough 到默认递归路径
 
-        # 非文本合并：组内存在文本 + 非文本时，
-        # 将非文本图层合并为单张背景图，文本图层独立保留
-        # 注意：传入组自身的绝对坐标作为 parent_left/parent_top，
-        # 这样返回的 layer_info 中 left/top 就是**相对组内部**的坐标
-        # （与文本子图层共用同一相对坐标基准）
+        # ── 路径 2: merge_with_text_kept —— 非文本合成 + 文本独立 ─────────
         merged_bg_info: dict[str, Any] | None = None
-        if not can_merge and exp._can_merge_group_non_text(layer):
+        if decision.action == "merge_with_text_kept":
             merged_bg_info = exp._merge_group_non_text_as_image(
-                layer, layer_name, full_name,
-                depth,
-                parent_left=layer.left,
-                parent_top=layer.top,
-                clip_bbox=parent_clip_bbox,
+                layer, layer_name, full_name, depth,
+                parent_left=layer.left, parent_top=layer.top,
             )
             if merged_bg_info is None:
-                print(
-                    f"{'  ' * depth}📁 {layer_name} "
-                    f"(非文本合并失败，回退逐层导出)"
-                )
+                print(f"{'  ' * depth}  ⚠️  merge_with_text_kept 失败，回退逐层导出")
 
-        print(f"{'  ' * depth}📁 {layer_name} (组)")
+        # ── 路径 3: merge_partial —— 按 PSD sibling 顺序交错处理 ───────────
+        # 关键设计：cluster 的合成图必须分配到它在 PSD 中"最高 idx 成员"
+        # 对应的 z 序位置（在 indep sibling 之间），不能集中前置。否则会把
+        # 真实位于 cluster 之上的 indep sibling 错置到 cluster 之下，
+        # 造成纯色 placeholder 反盖海滩主图等灾难性视觉错乱。
+        partial_merged_ids: set[int] = set()
+        partial_did_succeed = False
+        if decision.action == "merge_partial":
+            for cluster_members in decision.merged_clusters:
+                for m in cluster_members:
+                    partial_merged_ids.add(id(m))
 
+        # ── 路径 4: 默认递归（含上面任何路径回退到这里的情况） ────────────
         # 组的画布绝对坐标
         from config import Config
         grp_abs_left_orig = layer.left
@@ -313,44 +303,117 @@ class GroupHandler(LayerHandler):
         group_clip_bbox = (grp_abs_left, grp_abs_top,
                            grp_abs_left + grp_width, grp_abs_top + grp_height)
 
-        # 若已生成非文本合并背景图：临时隐藏所有**直接**非文本可见图层，
-        # 仅让 export_layers 递归导出文本图层，避免重复导出。
-        bg_hidden_saved: list[tuple[Any, bool]] = []
-        if merged_bg_info is not None:
-            non_text_layers: list[Any] = []
-            for c in layer:
-                if not c.visible or c.opacity == 0:
+        children: list[dict[str, Any]] = []
+
+        if decision.action == "merge_partial" and decision.merged_clusters:
+            # ── 按 PSD sibling 顺序交错处理 ─────────────────────────────
+            # 遍历组的直接子（PSD 自底向上顺序），对每个 sibling：
+            #   - 若 sibling 不属于任何 glued cluster → 走标准 handler 链
+            #     （单图层 / 子组 / 剪贴蒙版组等）
+            #   - 若 sibling 属于某 glued cluster：
+            #       * 不是该 cluster 最后一个成员 → 跳过（合成时一并处理）
+            #       * 是最后一个成员 → 触发该 cluster 合成（z 序在此分配）
+            # 这样合成图的 z 序与"该 cluster 最顶成员在 PSD 中的位置"一致，
+            # 浏览器堆叠语义与 PSD 合成语义对齐。
+            cluster_by_last_id: dict[int, list[Any]] = {}
+            for cluster_members in decision.merged_clusters:
+                if not cluster_members:
                     continue
-                if c.is_group():
-                    continue
-                kind = str(c.kind) if hasattr(c, 'kind') else ''
-                if 'type' not in kind.lower():
-                    non_text_layers.append(c)
-            for nt in non_text_layers:
-                bg_hidden_saved.append((nt, nt.visible))
-                try:
-                    nt.visible = False
-                except Exception:
-                    pass
+                # 取 cluster 中"最后一个被加入的成员"作为占位锚点
+                # （compose_cluster 严格按 PSD 自底向上顺序构建 cluster.members）
+                last = cluster_members[-1]
+                cluster_by_last_id[id(last)] = cluster_members
 
-        try:
-            children = exp.export_layers(
-                layer, full_name, depth + 1,
-                parent_left=grp_abs_left_orig,
-                parent_top=grp_abs_top_orig,
-                parent_clip_bbox=group_clip_bbox,
-            )
-        finally:
-            for nt, vis in bg_hidden_saved:
-                try:
-                    nt.visible = vis
-                except Exception:
-                    pass
+            cluster_idx_counter = 0
+            total_glued_clusters = len(decision.merged_clusters)
 
-        # 非文本合并背景图作为组的第一个子元素（最底层 z-index）
-        if merged_bg_info is not None:
-            children = [merged_bg_info] + children
+            sibling_list = list(layer)
+            for sib in sibling_list:
+                sid = id(sib)
+                if sid in partial_merged_ids:
+                    # 属于 cluster 的成员
+                    if sid in cluster_by_last_id:
+                        # 该 cluster 的"锚点"成员 → 触发合成
+                        cluster_members = cluster_by_last_id[sid]
+                        suffix = (
+                            f"-cluster{cluster_idx_counter}"
+                            if total_glued_clusters > 1 else ""
+                        )
+                        cluster_idx_counter += 1
+                        bg = exp._merge_cluster_layers_as_image(
+                            layer, cluster_members, layer_name, full_name, depth,
+                            parent_left=grp_abs_left_orig,
+                            parent_top=grp_abs_top_orig,
+                            suffix=suffix,
+                        )
+                        if bg is not None:
+                            children.append(bg)
+                            partial_did_succeed = True
+                    # else: 不是锚点成员，等到锚点出现时一并合成；
+                    # 标准 handler 链对它也跳过（在下面"独立处理 sibling"里被屏蔽）
+                else:
+                    # 独立 sibling（singleton independent cluster 成员）→ 标准 handler 链
+                    # 临时隐藏所有 cluster 成员，避免它们参与单 sibling 处理
+                    saved: list[tuple[Any, bool]] = []
+                    for c in sibling_list:
+                        if id(c) != sid and c.visible:
+                            saved.append((c, c.visible))
+                            try:
+                                c.visible = False
+                            except Exception:
+                                pass
+                    try:
+                        sub_children = exp.export_layers(
+                            [sib], full_name, depth + 1,
+                            parent_left=grp_abs_left_orig,
+                            parent_top=grp_abs_top_orig,
+                            parent_clip_bbox=group_clip_bbox,
+                        )
+                        children.extend(sub_children)
+                    finally:
+                        for c, vis in saved:
+                            try:
+                                c.visible = vis
+                            except Exception:
+                                pass
 
+            if not partial_did_succeed:
+                print(f"{'  ' * depth}  ⚠️  merge_partial 全部失败，回退逐层导出")
+                children = exp.export_layers(
+                    layer, full_name, depth + 1,
+                    parent_left=grp_abs_left_orig,
+                    parent_top=grp_abs_top_orig,
+                    parent_clip_bbox=group_clip_bbox,
+                )
+        else:
+            # merge_with_text_kept / merge_full 失败回退 / no_merge：
+            # 用 export_layers 一次性递归（必要时临时隐藏）
+            hidden_saved: list[tuple[Any, bool]] = []
+            if merged_bg_info is not None:
+                non_text = [t for t in self._collect_non_text_recursive(layer)]
+                for nt in non_text:
+                    hidden_saved.append((nt, nt.visible))
+                    try:
+                        nt.visible = False
+                    except Exception:
+                        pass
+            try:
+                children = exp.export_layers(
+                    layer, full_name, depth + 1,
+                    parent_left=grp_abs_left_orig,
+                    parent_top=grp_abs_top_orig,
+                    parent_clip_bbox=group_clip_bbox,
+                )
+            finally:
+                for nt, vis in hidden_saved:
+                    try:
+                        nt.visible = vis
+                    except Exception:
+                        pass
+
+            # merge_with_text_kept：合成图作为组的"最底层"子元素
+            if merged_bg_info is not None:
+                children = [merged_bg_info] + children
 
         if grp_overflow:
             offset_x = grp_abs_left - grp_abs_left_orig
@@ -375,8 +438,31 @@ class GroupHandler(LayerHandler):
             'z_index': exp._z_counter,
             'children': children,
         }
-        produced.append(group_info)
-        return HandlerResult(produced=produced, handled=True)
+        return HandlerResult(produced=[group_info], handled=True)
+
+    @staticmethod
+    def _collect_non_text_recursive(group_layer: Any) -> list[Any]:
+        """递归收集组内所有可见非文本叶图层（含子组里的）。
+
+        merge_with_text_kept 路径：合成图已包含所有非文本视觉，
+        递归导出时需把这些非文本图层临时隐藏，避免重复导出。
+        """
+        out: list[Any] = []
+
+        def walk(node: Any) -> None:
+            if not getattr(node, 'visible', True) or getattr(node, 'opacity', 255) == 0:
+                return
+            if node.is_group():
+                for c in node:
+                    walk(c)
+                return
+            kind = str(getattr(node, 'kind', '') or '').lower()
+            if 'type' not in kind:
+                out.append(node)
+
+        for c in group_layer:
+            walk(c)
+        return out
 
 
 class LeafLayerHandler(LayerHandler):
@@ -404,9 +490,8 @@ class LeafLayerHandler(LayerHandler):
 # ------------------------------------------------------------------
 
 
-#: 决策顺序很重要：跳过已合并背景 → 剪切蒙版组 → 跳过隐藏 → 组 → 叶图层
+#: 决策顺序：剪切蒙版组 → 跳过隐藏 → 组 → 叶图层
 DEFAULT_HANDLERS: list[LayerHandler] = [
-    BackgroundSkipHandler(),
     ClippingGroupHandler(),
     InvisibleLayerHandler(),
     GroupHandler(),

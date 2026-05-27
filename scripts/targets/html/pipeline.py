@@ -5,10 +5,19 @@ between ``core`` (PSD parsing + asset extraction) and ``targets/html``
 (codegen + postprocess + emit).
 
 Stage chain:
-    1. LoadPsdStage       — open the .psd (psd-tools)
-    2. ParseToIrStage     — PSD → IR (+ export all images to disk)
-    3. HtmlCodegenStage   — IR → HTML/CSS/metadata/README
-    4. LayoutOptimizeStage — postprocess the raw HTML/CSS
+    1. LoadPsdStage              — open the .psd (psd-tools)
+    2. ParseToIrStage            — PSD → IR (+ export all images to disk)
+    3. HtmlCodegenStage          — IR → HTML/CSS/metadata/README
+    4. PrunePreOptimizeStage     — 基于 index.html 剔除被遮挡 / 全透明图层
+                                   （直接覆盖 index.html / style.css）
+    5. LayoutOptimizeStage       — postprocess the raw HTML/CSS
+
+为何 Prune 在 Optimize 之前（2026-05-27）：
+- 剔除若发生在 LayoutOptimizer 内部或之后，DOMRestructure / FlexApplier 等
+  基于"子节点集合"做布局推断的 transformer 看到的子集合与"未优化版"不同，
+  flex 流重算导致兄弟节点位置偏移（实测 4% 像素差异）。
+- 剔除前置后，所有下游 transformer 看到的从一开始就是"剔除后的可见图层
+  集合"，envelope/对齐/flex 流推断与最终浏览器视觉天然一致。
 """
 
 from __future__ import annotations
@@ -91,12 +100,10 @@ class ParseToIrStage(Stage):
         assert ctx.psd is not None, "LoadPsdStage must run before ParseToIrStage"
         assert ctx.output_dir is not None, "output_dir must be set by LoadPsdStage"
 
-        # CLI --no-smart-merge → ctx.smart_merge=False，全链路关闭合图
-        smart_merge = bool(ctx.get("smart_merge", True))
-
+        # 解析阶段不做合图：1 PSD 图层 = 1 layer_info（叶图层）或 group_info（组）。
+        # CLI --no-smart-merge 仅影响下游 LayoutOptimizeStage，不影响这里。
         doc, exporter, legacy_tree = parse_psd_to_ir(
             psd_path=ctx.psd_path, output_dir=ctx.output_dir, psd=ctx.psd,
-            smart_merge=smart_merge,
         )
         # Validate IR round-trip (pydantic has already validated during construction).
         ctx.ir = doc
@@ -145,7 +152,81 @@ class HtmlCodegenStage(Stage):
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: Postprocess — layout optimization
+# Stage 4: Pre-optimize Prune — 基于 index.html 剔除被遮挡 / 全透明图层
+# ---------------------------------------------------------------------------
+
+class PrunePreOptimizeStage(Stage):
+    """剔除 index.html 中"视觉上看不见"的图层（被完全遮挡 / 自身全透明）。
+
+    输入：``html_path`` 指向的 ``index.html`` + 同目录 ``style.css``。
+    输出：**直接覆盖** ``index.html`` 与 ``style.css``（让用户看到的
+    "未优化版"也是已剔除的产物，保持与 ``index_optimized.html`` 视觉一致）。
+
+    必须跑在 ``LayoutOptimizeStage`` 之前。详见 transformers/
+    ``occluded_layer_pruner.py`` 模块文档。
+    """
+
+    name = "prune_pre_optimize"
+
+    def run(self, ctx: PipelineContext) -> PipelineContext:
+        from common.css_utils import (  # type: ignore
+            dict_to_css,
+            extract_global_css_header,
+            parse_css_to_dict,
+        )
+        from targets.html.postprocess.layout_optimizer.transformers.occluded_layer_pruner import (  # type: ignore
+            prune_index_html,
+        )
+
+        html_path = ctx.get("html_path")
+        if not html_path:
+            ctx.log("prune_pre_optimize: skipped (no html_path)")
+            return ctx
+        html_path = Path(html_path)
+        css_path = html_path.parent / "style.css"
+        if not (html_path.exists() and css_path.exists()):
+            ctx.log("prune_pre_optimize: skipped (html/css missing)")
+            return ctx
+
+        try:
+            html_content = html_path.read_text(encoding="utf-8")
+            css_content = css_path.read_text(encoding="utf-8")
+            css_header = extract_global_css_header(css_content)
+            css_rules = parse_css_to_dict(css_content)
+
+            html_pruned, css_rules_pruned, prune_stats = prune_index_html(
+                html_content=html_content,
+                css_rules=css_rules,
+                html_dir=html_path.parent,
+            )
+
+            pruned_n = prune_stats.get("occluded_layers_pruned", 0)
+            if pruned_n > 0:
+                # 写回原文件（覆盖）：让 index.html 与 index_optimized.html
+                # 在"被剔除图层"这一维度上保持一致。
+                html_path.write_text(html_pruned, encoding="utf-8")
+                css_path.write_text(
+                    dict_to_css(css_rules_pruned, header=css_header),
+                    encoding="utf-8",
+                )
+                ctx.log(
+                    f"pre-optimize prune: 剔除 {pruned_n} 个图层 "
+                    f"(节省 {prune_stats.get('occluded_bytes_saved', 0) / 1024:.1f} KB)"
+                )
+            else:
+                ctx.log("pre-optimize prune: 无可剔除图层")
+
+            ctx.set("prune_stats", prune_stats)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  被遮挡图层剔除失败（保留原始 index.html）: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return ctx
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Postprocess — layout optimization
 # ---------------------------------------------------------------------------
 
 class LayoutOptimizeStage(Stage):
@@ -182,10 +263,14 @@ class LayoutOptimizeStage(Stage):
             pretty_enabled = ctx.get("css_pretty_enabled", True)
             # CLI --css-style 选择 compact（默认，紧凑接近 figma）/ expanded（开发友好详尽）
             pretty_style = ctx.get("css_pretty_style", "compact")
-            # CLI --no-smart-merge：关闭 LayoutOptimizer 链路里的两项合图
-            #  1) DOMRestructure 多层背景内联合成 → images_dir=None 跳过
-            #  2) ImageLayerFlatten（步骤 1.2）→ FlattenConfig(enabled=False)
+            # CLI --no-smart-merge：关闭 LayoutOptimizer 链路的"多层背景内联合成"
+            #   (DOMRestructure 把容器内多张装饰背景合成为单张 PNG，
+            #    不删除任何 DOM 子节点，副作用小，默认开启)
+            # ⚠️ ImageLayerFlatten（步骤 1.2）默认关闭（FlattenConfig dataclass 默认
+            #   enabled=False），它会把容器内 N 个 image 子合成单图并删除子 DOM，
+            #   过于粗暴。需启用须显式 --enable-image-layer-flatten。
             smart_merge = bool(ctx.get("smart_merge", True))
+            image_layer_flatten_enabled = bool(ctx.get("image_layer_flatten_enabled", False))
             # style_optimized.css 是最终交付物，默认不写任何注释（章节标题 /
             # 版块切分 / 合并组数量注释全部关闭）。映射信息通过 layer_map.json /
             # class_alias_map.json / _mapping_report.md 三个 sidecar 文件提供。
@@ -202,7 +287,7 @@ class LayoutOptimizeStage(Stage):
                 global_header=css_header,
                 pretty_config=pretty_cfg,
                 images_dir=(html_path.parent / "images") if smart_merge else None,
-                flatten_config=FlattenConfig(enabled=smart_merge),
+                flatten_config=FlattenConfig(enabled=image_layer_flatten_enabled),
             )
 
             html_opt_path = html_path.with_name(html_path.stem + "_optimized.html")
@@ -325,5 +410,6 @@ def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
         LoadPsdStage(),
         ParseToIrStage(),
         HtmlCodegenStage(),
+        PrunePreOptimizeStage(),
         LayoutOptimizeStage(),
     ])

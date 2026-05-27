@@ -1227,6 +1227,37 @@ class DOMRestructure:
 
             if not candidates:
                 break
+
+            # z 序最低性约束（关键）：候选必须是 z 最低的之一，否则它在
+            # PSD 中是"上层装饰大图"。被错误剥离后会被 _absorb_normal_backgrounds
+            # 吸收到容器 CSS background-image，CSS 语义上 background 永远在
+            # 子元素之下 → 视觉叠序被破坏（上层装饰被压到底层，下层米黄底反而
+            # 暴露在视觉中显眼位置）。
+            #
+            # DOM 中 leaf.element 的 sibling index 就是 PSD z-index 从低到高，
+            # 因此候选必须满足：sibling_index(候选) ≤ min(sibling_index(非候选))。
+            # 与 _absorb_container_backgrounds_pass 中的 z 校验语义一致。
+            #
+            # 典型 case（抽奖活动页面-01-520 PSD 组 51）：
+            #   layer-7/8/9（z=低）+ layer-10/11（z=高，覆盖整组的上层装饰大图）
+            #   旧逻辑：layer-10/11 几何上 area=99.84% 完全包含其他 → 被错误剥离
+            #   新逻辑：sibling_index(10/11) 高于 sibling_index(7/8/9) → 不剥离
+            #   → 整组 5 layers 进入 _is_stack_group → 80% 重叠对 ≥ 50% → 判 stack
+            #   → 保持原 absolute z 序，与未优化版渲染一致。
+            non_cand_min_z = min(
+                self._sibling_index_in_dom(leaf)
+                for leaf in remaining
+                if leaf not in candidates
+            ) if any(leaf not in candidates for leaf in remaining) else None
+
+            if non_cand_min_z is not None:
+                candidates = [
+                    leaf for leaf in candidates
+                    if self._sibling_index_in_dom(leaf) <= non_cand_min_z
+                ]
+
+            if not candidates:
+                break
             bg = max(candidates, key=lambda l: l.bbox.area)
             bg_list.append(bg)
             remaining = [l for l in remaining if l is not bg]
@@ -2300,8 +2331,16 @@ class DOMRestructure:
         # 清除原有的 position:absolute（如果有），让它回到 flex 流
         # - static 场景不写 position（浏览器默认就是 static）
         # - relative 场景显式写入
+        # - 例外：若子元素带 z-index（非 None / 非 auto），强制写 relative
+        #   让 stacking context 必然生效；与 flex_applier 的同名规则保持一致，
+        #   避免同容器内"static + z-index"与"relative + z-index"混存导致的
+        #   跨浏览器视觉层级差异
         styles.pop('position', None)
-        if child_position != 'static':
+        if child_position == 'static':
+            has_z_index = styles.get('z-index') not in (None, 'auto', '')
+            if has_z_index:
+                styles['position'] = 'relative'
+        else:
             styles['position'] = child_position
 
         # 清除旧 margin（避免累加）

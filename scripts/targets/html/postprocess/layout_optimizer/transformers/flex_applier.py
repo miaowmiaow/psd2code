@@ -137,19 +137,29 @@ class FlexApplier:
                             child_css['margin-top'] = f"{gap}px"
                 
                 # 移除 position、top、left
-                # 例外：子元素本身是 stack wrapper（含 v-stack class）→ 它内部
+                # 例外 1：子元素本身是 stack wrapper（含 v-stack class）→ 它内部
                 # 有 absolute 子节点，必须保留 position:relative 作为 containing
                 # block，否则内部子节点会脱离 wrapper 跑到外层 positioned 祖先
                 # （典型场景：dom_restructure 把某 group 升级为 v-stack 容器后，
                 # 该 group 又作为父 group 的趋势子元素被 flex 化）
+                # 例外 2：子元素带 z-index（非 None / 非 auto）→ 必须显式写
+                # position:relative 让 z-index 必然建立 stacking context。
+                # 否则同容器内"static + z-index"与"relative + z-index"混存时，
+                # 不同浏览器对 flex item stacking 的实现差异会导致视觉层级异常
+                # （典型场景：抽奖活动页面 .bg-section-2 flex column 内，
+                # .group-2-2 是 relative+z=33、.huodongshi/.ninhao/.btn-receive
+                # 是 static+z=29/30/31，导致 .group-2-2 的 .alade 头像装饰
+                # 偶发被 huodongshi 等遮挡）
                 is_stack_wrapper = 'v-stack' in (child_info.get('classes') or [])
+                has_z_index = child_css.get('z-index') not in (None, 'auto', '')
+                needs_relative = is_stack_wrapper or has_z_index
                 if 'position' in child_css:
-                    if is_stack_wrapper:
+                    if needs_relative:
                         child_css['position'] = 'relative'
                     else:
                         del child_css['position']
                         self.stats['positions_removed'] += 1
-                elif is_stack_wrapper:
+                elif needs_relative:
                     child_css['position'] = 'relative'
                 if 'top' in child_css:
                     del child_css['top']
@@ -219,15 +229,19 @@ class FlexApplier:
                     child_css['margin-top'] = f"{child_info['top']}px"
                 
                 # 移除 position、top、left
-                # 例外：子元素若是 v-stack wrapper → 保留 position:relative
+                # 例外：与 _apply_vertical_layout 同名注释一致
+                # - v-stack wrapper 子保留 relative 作 containing block
+                # - 子元素带 z-index 显式写 relative 让 stacking context 必然生效
                 is_stack_wrapper = 'v-stack' in (child_info.get('classes') or [])
+                has_z_index = child_css.get('z-index') not in (None, 'auto', '')
+                needs_relative = is_stack_wrapper or has_z_index
                 if 'position' in child_css:
-                    if is_stack_wrapper:
+                    if needs_relative:
                         child_css['position'] = 'relative'
                     else:
                         del child_css['position']
                         self.stats['positions_removed'] += 1
-                elif is_stack_wrapper:
+                elif needs_relative:
                     child_css['position'] = 'relative'
                 if 'top' in child_css:
                     del child_css['top']

@@ -38,7 +38,15 @@ class LayoutOptimizer:
         1.2 图层扁平化：把容器自身 bg + 全部 image 子合成为容器自己的单背景
         1.5 同质兄弟分组：识别"平铺的同质卡片"包成 v-list（flex-wrap）
         2. Flex 布局：识别横向/垂直排列模式并应用 flex
+        2.5 单子 wrapper 折叠
         3. CSS 去冗余：精简 z-index + 合并属性等价的选择器
+
+        注：被完全遮挡图层剔除（OccludedLayerPruner）已迁移为独立 Stage
+        ``PrunePreOptimizeStage``，跑在 LayoutOptimizer **之前**：基于
+        index.html 静态产物做"基于像素 + 几何遮挡"的剔除，传入本优化器的
+        是"已剔除后的可见图层 DOM"。这样 DOMRestructure / FlexApplier 看
+        到的子节点集合从一开始就是最终视觉子节点集合，envelope/对齐推断
+        从源头一致，不需要 flex 子保护、阈值也无需极保守。
         3.3 位置噪声宽容合并：同 base + 非位置签名相同 → 归一到代表样式
                             （把 ``nickname-2..10`` 这种"只 margin 抖动"的列表项
                             合并为单一类，**牺牲 ≤8px 位置精度换样式复用**）
@@ -102,6 +110,7 @@ class LayoutOptimizer:
             'sibling_lists_created': 0,
             'sibling_items_wrapped': 0,
             'z_index_pruned': 0,
+            'z_index_filled': 0,
             'css_rules_merged': 0,
             'classes_unified': 0,
             'elements_unified': 0,
@@ -180,6 +189,10 @@ class LayoutOptimizer:
             import traceback
             traceback.print_exc()
 
+        # 步骤 1.6（已迁移）：被完全遮挡图层剔除现在是独立 Stage
+        # （PrunePreOptimizeStage）跑在本优化器**之前**，传入的 html_content
+        # 已是"剔除后的可见图层 DOM"。
+
         # 步骤 2：应用 Flex 布局
         try:
             self.flex_applier.apply_flex_layouts()
@@ -195,6 +208,9 @@ class LayoutOptimizer:
             print(f"⚠️  单子 wrapper 折叠失败: {e}")
             import traceback
             traceback.print_exc()
+
+        # 步骤 2.7（已迁移）：被完全遮挡图层剔除已迁移到 LayoutOptimizer
+        # 之前的独立 Stage（PrunePreOptimizeStage）。
 
         # 步骤 3：CSS 去冗余（z-index 精简 + 等价规则合并）
         # 必须在所有 DOM/CSS 调整之后运行，保证看到的是最终态。
@@ -287,6 +303,8 @@ class LayoutOptimizer:
         if self.stats.get('wrappers_collapsed'):
             print(f"   - 单子 wrapper 折叠: {self.stats['wrappers_collapsed']} 个")
         print(f"   - z-index 精简: {self.stats['z_index_pruned']} 处")
+        if self.stats.get('z_index_filled'):
+            print(f"   - z-index 兜底补全 (混合状态): {self.stats['z_index_filled']} 处")
         print(f"   - CSS 等价规则合并: 节省 {self.stats['css_rules_merged']} 条")
         if self.stats.get('position_relaxed_groups'):
             print(

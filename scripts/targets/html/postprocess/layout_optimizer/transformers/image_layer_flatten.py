@@ -66,8 +66,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 @dataclass
 class FlattenConfig:
-    """图层扁平化配置（默认值开箱即用）"""
-    enabled: bool = True
+    """图层扁平化配置（默认关闭，2026-05-27 起）
+
+    历史：默认 enabled=True，期望"几张装饰小 PNG 合成 1 张 + 减少 DOM/CSS"。
+    实践：该合并过于粗暴，多数业务场景下负面影响远大于收益。典型反例：
+      - 抽奖活动「游泳圈」组：游泳圈 pixel 底图 + 数字框矩形 + 礼盒文字图
+        语义上是 3 个独立可维护元素，被合成为一张 flat-*.png 后全部丧失
+        DOM 可访问性与样式可调性（无法独立改色、换文案、绑事件）。
+      - 任何「混合 PSD kind（pixel + shape + type 被栅格化的）」组都会被
+        当成纯装饰叠图误判。
+    判定虽然检查了 data-type=image / 单 PNG / 邻接连通等，但无法识别
+    "栅格化产物背后的语义角色"，可维护性损失不可接受。
+
+    决定：默认关闭。需要时显式 ``FlattenConfig(enabled=True)`` 启用，
+    或先按子类型/语义类名加更严格的护栏后再考虑重新默认开启。
+    """
+    enabled: bool = False
     # 总层数（容器自身 bg + 子层数）≥ 该值才考虑合成
     min_total_layers: int = 2
     # 合成 envelope 面积占画布的最大比例（防止合成全屏图导致一张超大 PNG）

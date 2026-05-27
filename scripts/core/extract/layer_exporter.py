@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-图层导出模块
-- 保留完整 PSD 图层层级结构（组→嵌套 children）
-- 使用 layer.left / layer.top 获取画布绝对坐标
-- 文本图层保留为 text 类型，有旋转/倾斜的文本降级为图片
-- 图片图层自动渲染描边/阴影/发光等效果
-- 图片命名 = 原图层名（拼音）+ 唯一数字
+图层导出模块（纯解析版）
+- 一 PSD 图层 = 一 layer_info（叶图层）或 group_info（组）
+- 解析阶段不做任何"装饰性合图"
+- 唯一例外：PSD 原生剪贴蒙版语义（CSS 无法等价还原），见 _merge_clipping_group
+  与 _export_clipped_layer_against_group_base
+- 文本图层保留为 text 类型，有旋转/倾斜或图层效果的文本降级为图片
+- 图片图层会渲染描边/阴影/发光等效果（PSD 像素级还原）
+- 图片命名 = 原图层名（拼音）+ 内容指纹
+
+合图（多 PNG → 1 PNG、多 div 折叠为 1 div）的优化由下游
+LayoutOptimizer (targets/html/postprocess/layout_optimizer) 接管。
 """
 
 from typing import Any
@@ -74,9 +79,9 @@ BLEND_MODES: dict[str, str] = {
 
 
 class LayerExporter:
-    """图层导出器 - 保留完整层级结构"""
+    """图层导出器（纯解析版） - 保留完整层级结构，1 图层 = 1 div = 1 PNG"""
 
-    def __init__(self, psd: Any, output_dir: Path, smart_merge: bool = True):
+    def __init__(self, psd: Any, output_dir: Path):
         self.psd = psd
         self.output_dir = output_dir
         self.images_dir = output_dir / 'images'
@@ -93,18 +98,6 @@ class LayerExporter:
         # 图片去重：md5 → 已保存的 image_path (如 'images/xxx.png')
         self._image_hash_map: dict[str, str] = {}
         self._dedup_count: int = 0
-
-        # smart_merge=False 关闭「智能合图」：
-        #   - _can_merge_group / _can_merge_group_non_text 直接返回 False
-        #     → 装饰组不被合成为单张 PNG，保持组结构逐层导出
-        #   - _detect_background_layers 返回 []
-        #     → 画布底部连续背景图层不被合一张背景图
-        # 此开关仅影响 PSD → 中间产物阶段的图片合成，CSS/HTML
-        # 布局优化阶段的两项合图（DOMRestructure 内联背景合成、
-        # ImageLayerFlatten）由上层管线各自控制（参考
-        # targets/html/pipeline.LayoutOptimizeStage 与
-        # core/converter.PSDToHTMLConverter）。
-        self.smart_merge = smart_merge
 
     def _save_image_dedup(self, img: Image.Image, name: str, depth: int) -> str:
         """
@@ -144,164 +137,6 @@ class LayerExporter:
     # ------------------------------------------------------------------
     # 公开 API
     # ------------------------------------------------------------------
-
-    def _detect_background_layers(self, layers_list: list[Any]) -> list[Any]:
-        """
-        检测从图层栈底部开始的连续背景图层。
-
-        背景图层需满足以下所有条件：
-        1. 从图层栈底部开始连续排列（遇到不满足的即停止）
-        2. 非组、非文本图层
-        3. 宽度完全覆盖画布 (bbox.left ≤ 0 且 bbox.right ≥ canvas_width)
-        4. opacity = 255 且 blend_mode = NORMAL
-        5. 不是剪切蒙版
-        6. 可见（visible=True）
-
-        Returns:
-            符合条件的背景图层列表（按从底到上顺序），
-            少于 2 个时返回空列表（单层无需合并）
-        """
-        # 总开关：smart_merge=False 放弃画布底部连续背景合并
-        if not self.smart_merge:
-            return []
-
-        bg_layers: list[Any] = []
-        canvas_w = self.psd.width
-
-        for layer in layers_list:
-            # 跳过隐藏/完全透明图层（不中断扫描）
-            if not layer.visible or layer.opacity == 0:
-                continue
-
-            # 遇到组 → 停止扫描
-            if layer.is_group():
-                break
-
-            # 遇到文本 → 停止扫描
-            kind = str(layer.kind) if hasattr(layer, 'kind') else ''
-            if 'type' in kind.lower():
-                break
-
-            # 检查是否全宽覆盖画布
-            bbox = layer.bbox
-            if bbox[0] > 0 or bbox[2] < canvas_w:
-                break
-
-            # 检查不透明度
-            if layer.opacity != 255:
-                break
-
-            # 检查混合模式
-            bm = str(layer.blend_mode)
-            if 'NORMAL' not in bm.upper():
-                break
-
-            # 检查是否为剪切蒙版
-            if self._is_clipping(layer):
-                break
-
-            bg_layers.append(layer)
-
-        # 至少 2 个才有合并意义
-        return bg_layers if len(bg_layers) >= 2 else []
-
-    def _merge_background_layers(
-        self, bg_layers: list[Any], depth: int,
-        parent_left: int, parent_top: int,
-    ) -> dict[str, Any] | None:
-        """
-        将底部连续的背景图层合并为一张图片。
-
-        使用手动 alpha 合成（从底到上 Porter-Duff over），
-        结果裁切到画布范围 (0, 0, canvas_w, canvas_h)。
-        """
-
-        canvas_w, canvas_h = self.psd.width, self.psd.height
-        names = [l.name for l in bg_layers]
-        print(f"{'  ' * depth}🎨 合并背景图层: {names}")
-
-        try:
-            canvas = np.zeros((canvas_h, canvas_w, 4), dtype=np.float32)
-
-            for layer in bg_layers:
-                img = layer.topil()
-                if img is None:
-                    continue
-                if img.mode != 'RGBA':
-                    img = img.convert('RGBA')
-
-                # 应用图层蒙版
-                img = _apply_layer_mask(layer, img, layer.bbox)
-
-                arr = ImageArrayUtils.pil_to_float_array(img)
-                bbox = layer.bbox
-
-                # 计算图层与画布的交集区域
-                src_x0 = max(0, -bbox[0])
-                src_y0 = max(0, -bbox[1])
-                dst_x0 = max(0, bbox[0])
-                dst_y0 = max(0, bbox[1])
-                cp_w = min(arr.shape[1] - src_x0, canvas_w - dst_x0)
-                cp_h = min(arr.shape[0] - src_y0, canvas_h - dst_y0)
-
-                if cp_w <= 0 or cp_h <= 0:
-                    continue
-
-                src_region = arr[src_y0:src_y0 + cp_h, src_x0:src_x0 + cp_w]
-                dst_region = canvas[dst_y0:dst_y0 + cp_h, dst_x0:dst_x0 + cp_w]
-
-                # Porter-Duff over 合成
-                src_a = src_region[:, :, 3:4]
-                dst_a = dst_region[:, :, 3:4]
-                out_a = src_a + dst_a * (1 - src_a)
-                safe_a = np.maximum(out_a, 1e-10)
-                out_rgb = (src_region[:, :, :3] * src_a +
-                           dst_region[:, :, :3] * dst_a * (1 - src_a)) / safe_a
-
-                canvas[dst_y0:dst_y0 + cp_h, dst_x0:dst_x0 + cp_w, :3] = out_rgb
-                canvas[dst_y0:dst_y0 + cp_h, dst_x0:dst_x0 + cp_w, 3:4] = out_a
-
-            # 检查是否完全透明
-            if canvas[:, :, 3].max() == 0:
-                print(f"{'  ' * depth}🚫 背景合并后完全透明")
-                return None
-
-            merged_img = ImageArrayUtils.float_array_to_pil(canvas)
-
-            self._z_counter += 1
-
-            # 背景图层固定在画布左上角 (0, 0)
-            rel_left = 0 - parent_left
-            rel_top = 0 - parent_top
-
-            layer_info: dict[str, Any] = {
-                'id': f'layer-{self._z_counter}',
-                'name': 'background',
-                'full_name': 'background',
-                'left': rel_left,
-                'top': rel_top,
-                'width': canvas_w,
-                'height': canvas_h,
-                'opacity': 1.0,
-                'blend_mode': 'normal',
-                'z_index': self._z_counter,
-                'type': 'image',
-            }
-
-            # 保存图片（去重）
-            rel_path = self._save_image_dedup(merged_img, 'background', depth)
-            layer_info['image_path'] = rel_path
-
-            total = len(bg_layers)
-            print(f"{'  ' * depth}🖼️  background [合并{total}层 {canvas_w}x{canvas_h}] → {rel_path}")
-            self.exported_count += total
-            return layer_info
-
-        except Exception as e:
-            print(f"{'  ' * depth}❌ 合并背景图层失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     @staticmethod
     def _is_clipping(layer: Any) -> bool:
@@ -343,660 +178,17 @@ class LayerExporter:
                 i += 1
         return grouped
 
-    @staticmethod
-    def _has_canvas_expanding_effects(layer: Any) -> bool:
-        """
-        判断图层是否包含需要扩展画布的效果（外描边、外发光、投影）。
-        内描边、内发光、内阴影、ColorOverlay 不需要扩展画布，不计入。
-        """
-        if not hasattr(layer, 'effects') or not layer.effects:
-            return False
-        for effect in layer.effects:
-            if not is_effect_active(effect, layer):
-                continue
-            name = str(effect)
-            if name == 'DropShadow':
-                return True
-            elif name == 'OuterGlow':
-                return True
-            elif name == 'Stroke':
-                desc = effect.descriptor
-                style = desc.get(b'Styl')
-                style_val = style.enum if hasattr(style, 'enum') else b''
-                # InsF = 内描边，不需要扩展；OutF/CtrF = 外描边/居中描边，需要扩展
-                if style_val != b'InsF':
-                    return True
-        return False
-
-    def _is_button_group(self, group_layer: Any) -> bool:
-        """
-        判断组是否为按钮（按钮需要将文本和背景合并导出为单张图片）。
-        
-        按钮特征：
-        1. 组内子图层数量较少（1-5个）
-        2. 包含文本图层
-        3. 包含背景图片或形状图层
-        4. 尺寸较小（宽度 <= 600px，高度 <= 150px）
-        5. **名称包含按钮关键词（强校验）**
-        6. **文本不包含数字（排除动态内容）**
-        """
-        # 获取可见子图层
-        visible_children = [
-            child for child in group_layer
-            if child.visible and child.opacity > 0
-        ]
-        
-        if len(visible_children) == 0:
-            return False
-        
-        # 条件1：子图层数量1-5个
-        if len(visible_children) > 5:
-            return False
-        
-        # 条件4：尺寸检查
-        grp_bbox = group_layer.bbox
-        grp_w = grp_bbox[2] - grp_bbox[0]
-        grp_h = grp_bbox[3] - grp_bbox[1]
-        
-        # 支持横向长条按钮（如"未符合条件" 460x52px）
-        # 宽度放宽至 600px，高度放宽至 150px
-        if grp_w > 600 or grp_h > 150:
-            return False
-        
-        # 条件2 & 3：检查是否同时包含文本和图片
-        # 注意：按钮可能包含子组（如装饰元素），需要递归检查
-        has_text = False
-        has_image = False
-        text_layers = []
-        
-        def check_layer_recursive(layer, depth=0):
-            """递归检查图层，寻找文本和图片"""
-            nonlocal has_text, has_image
-            
-            if layer.is_group():
-                # 子组：递归检查其子图层
-                for child in layer:
-                    if child.visible and child.opacity > 0:
-                        check_layer_recursive(child, depth + 1)
-            else:
-                # 普通图层
-                kind = str(layer.kind) if hasattr(layer, 'kind') else ''
-                if 'type' in kind.lower():
-                    has_text = True
-                    text_layers.append(layer)
-                else:
-                    has_image = True
-        
-        for child in visible_children:
-            check_layer_recursive(child)
-        
-        if not (has_text and has_image):
-            return False
-        
-        # 条件5（关键）：**名称必须明确包含按钮关键词**
-        name_lower = group_layer.name.lower() if group_layer.name else ''
-        
-        # 强校验：按钮必须包含以下关键词之一
-        # 注意：使用完整词而非单字，避免误匹配
-        button_keywords = [
-            '按钮', 'btn', 'button',
-            '立即', '马上',  # 行动类词汇（精确）
-            '抽奖', '领取奖', '领奖', '开始游戏',  # 完整动作短语
-            '领取', '开始', '确认', '取消', '提交', 
-            '登录', '注册', '购买', '支付', '充值',
-            '详情', '查看详情', '返回', '关闭',
-            '点击', '免费', '立即体验',
-            '?', '？',  # 问号按钮（帮助/说明）
-            'help', 'info', 'question',  # 英文帮助类关键词
-        ]
-        
-        # 递归收集所有子图层名称（包括子组内的）
-        def collect_all_names(layer):
-            names = [layer.name.lower() if layer.name else '']
-            if layer.is_group():
-                for child in layer:
-                    names.extend(collect_all_names(child))
-            return names
-        
-        all_child_names = []
-        for child in visible_children:
-            all_child_names.extend(collect_all_names(child))
-        
-        child_names_str = ' '.join(all_child_names)
-        combined_name = f"{name_lower} {child_names_str}"
-        
-        has_button_keyword = any(kw in combined_name for kw in button_keywords)
-        
-        # **如果名称不包含按钮关键词，直接排除**
-        if not has_button_keyword:
-            return False
-        
-        # 条件6：**文本不能包含数字（排除动态内容）**
-        # 如"已解锁人数：100人"、"累抽集欧气 x3" 都包含数字，应排除
-        for text_layer in text_layers:
-            text_content = self._extract_text_content(text_layer)
-            if text_content and any(char.isdigit() for char in text_content):
-                # 文本包含数字，可能是动态内容，不作为按钮
-                return False
-        
-        # 满足所有条件，确认为按钮
-        return True
-    
-    def _extract_text_content(self, text_layer: Any) -> str:
-        """
-        提取文本图层的文本内容
-        """
-        try:
-            if hasattr(text_layer, 'text'):
-                return str(text_layer.text)
-            elif hasattr(text_layer, 'engine_dict'):
-                # 尝试从引擎字典提取
-                engine = text_layer.engine_dict
-                if 'Editor' in engine and 'Text' in engine['Editor']:
-                    return str(engine['Editor']['Text'])
-        except Exception:
-            pass
-        return ''
-
-    def _calc_group_expand(self, group_layer: Any) -> int:
-        """
-        计算组内所有图层效果溢出所需的最大扩展像素数。
-        
-        遍历组内所有可见图层（包括子组），检查其效果（OuterGlow、Stroke等），
-        返回所需的最大扩展像素数。
-        """
-        max_expand = 0
-        
-        def calc_layer_expand(layer) -> int:
-            """计算单个图层的效果扩展像素数"""
-            if not hasattr(layer, 'effects') or not layer.effects:
-                return 0
-            
-            expand = 0
-            for effect in layer.effects:
-                if not is_effect_active(effect, layer):
-                    continue
-                desc = effect.descriptor
-                name = str(effect)
-                
-                if name == 'Stroke':
-                    size = int(float(desc.get(b'Sz  ', 0)))
-                    style = desc.get(b'Styl')
-                    style_str = ''
-                    if hasattr(style, 'enum'):
-                        style_str = str(style.enum)
-                    # OutF=外描边  CtrF=居中描边
-                    if b'OutF' in str(style_str).encode() or 'OutF' in style_str or 'Outset' in style_str:
-                        expand = max(expand, size + 2)
-                    elif b'CtrF' in str(style_str).encode() or 'CtrF' in style_str or 'Center' in style_str:
-                        expand = max(expand, size // 2 + 2)
-                
-                elif name == 'OuterGlow':
-                    # PS 外发光是高斯衰减软边，可见半径远大于 blur 本身：
-                    #   实际可见半径 ≈ blur * (1 + spread/100) * 1.5
-                    # 仅用 blur+常数 会导致外缘被裁（典型表现：发光边沿出现硬切）
-                    import math
-                    blur = float(desc.get(b'blur', 0))
-                    spread = float(desc.get(b'Ckmt', 0))  # 扩展百分比（0-100）
-                    radius = blur * (1.0 + spread / 100.0) * 1.5
-                    expand = max(expand, int(math.ceil(radius)) + 2)
-                
-                elif name == 'DropShadow':
-                    # 投影同理：distance 是位移，blur 是高斯模糊半径，
-                    # 实际衰减半径 ≈ blur * (1 + spread/100) * 1.5
-                    import math
-                    blur = float(desc.get(b'blur', 0))
-                    dist = float(desc.get(b'Dstn', 0))
-                    spread = float(desc.get(b'Ckmt', 0))
-                    radius = blur * (1.0 + spread / 100.0) * 1.5
-                    expand = max(expand, int(math.ceil(dist + radius)) + 2)
-            
-            return expand
-        
-        def check_layer(layer):
-            nonlocal max_expand
-            if not layer.visible or layer.opacity == 0:
-                return
-            
-            if layer.is_group():
-                # 递归检查子组
-                for child in layer:
-                    check_layer(child)
-            else:
-                # 普通图层：检查效果
-                expand = calc_layer_expand(layer)
-                max_expand = max(max_expand, expand)
-        
-        for child in group_layer:
-            check_layer(child)
-        
-        return max_expand
-    
-    def _should_use_manual_render(self, group_layer: Any) -> bool:
-        """
-        判断是否应该使用手动渲染而不是 composite()。
-        
-        需要手动渲染的情况：
-        1. 组内包含特殊混合模式（SCREEN/LINEAR_DODGE等）
-           因为 psd-tools 的 composite() 会在黑色背景上合成这些混合模式，
-           导致黑色被"烘焙"到图层数据中，无论组本身是什么混合模式
-        
-        Returns:
-            True: 需要手动渲染（逐层导出）; False: 可以使用 composite()
-        """
-        # 检查组内是否有特殊混合模式（不限制组本身的混合模式）
-        special_blend_modes = {
-            'BlendMode.SCREEN',
-            'BlendMode.LINEAR_DODGE', 
-            'BlendMode.COLOR_DODGE',
-            'BlendMode.LIGHTEN',
-            'BlendMode.LINEAR_LIGHT',
-        }
-        
-        def has_special_blend(layer) -> bool:
-            if not layer.visible or layer.opacity == 0:
-                return False
-            
-            blend_mode_str = str(layer.blend_mode)
-            if blend_mode_str in special_blend_modes:
-                return True
-            
-            # 递归检查子组
-            if layer.is_group():
-                for child in layer:
-                    if has_special_blend(child):
-                        return True
-            
-            return False
-        
-        for child in group_layer:
-            if has_special_blend(child):
-                return True
-        
-        return False
-    
-    def _render_group_manually(
-        self, group_layer: Any, grp_bbox: tuple[int, int, int, int], depth: int
-    ) -> 'Image.Image | None':
-        """
-        纯手动渲染组（不扩展画布）。
-        
-        用于处理 PASS_THROUGH 组 + 特殊混合模式的情况，
-        避免 psd-tools composite() 在黑色背景上合成导致的黑色穿透问题。
-        
-        Returns:
-            合成后的 PIL Image（RGBA），尺寸为组的 bbox 尺寸
-        """
-        from core.render.effects.effects_renderer import render_layer_with_effects
-
-        grp_w = grp_bbox[2] - grp_bbox[0]
-        grp_h = grp_bbox[3] - grp_bbox[1]
-        
-        # 创建透明画布
-        canvas = np.zeros((grp_h, grp_w, 4), dtype=np.float32)
-        
-        def render_subgroup(sub_grp, depth_offset=0):
-            """递归渲染子组 - 始终使用手动渲染避免黑色背景"""
-            # 递归手动渲染所有子图层
-            for child in sub_grp:
-                render_layer(child, depth_offset + 1)
-        
-        def render_layer(layer, depth_offset=0):
-            """递归渲染图层"""
-            nonlocal canvas
-            
-            if not layer.visible or layer.opacity == 0:
-                return
-            
-            if layer.is_group():
-                render_subgroup(layer, depth_offset)
-                return
-            
-            # 普通图层：渲染效果
-            result = render_layer_with_effects(layer)
-            if result is None:
-                return
-            
-            img, eff_bbox = result
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            
-            # 计算图层在画布上的位置
-            layer_x = eff_bbox[0] - grp_bbox[0]
-            layer_y = eff_bbox[1] - grp_bbox[1]
-            layer_w = eff_bbox[2] - eff_bbox[0]
-            layer_h = eff_bbox[3] - eff_bbox[1]
-            
-            layer_arr = ImageArrayUtils.pil_to_float_array(img)
-            
-            # 合成到 canvas
-            y0, y1 = layer_y, layer_y + layer_h
-            x0, x1 = layer_x, layer_x + layer_w
-            if 0 <= y0 < grp_h and 0 <= x0 < grp_w:
-                y1 = min(y1, grp_h)
-                x1 = min(x1, grp_w)
-                h_copy = y1 - y0
-                w_copy = x1 - x0
-                if h_copy > 0 and w_copy > 0:
-                    canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
-                        canvas[y0:y1, x0:x1], layer_arr[:h_copy, :w_copy]
-                    )
-        
-        # 渲染所有子图层
-        for child in group_layer:
-            render_layer(child)
-        
-        # 转换为 PIL Image
-        return ImageArrayUtils.float_array_to_pil(canvas)
-    
-    def _render_group_with_hybrid_strategy(
-        self, group_layer: Any, grp_bbox: tuple[int, int, int, int],
-        expand: int, depth: int
-    ) -> 'Image.Image | None':
-        """
-        混合渲染策略：手动逐层渲染（保留溢出效果），再用 composite() 覆盖内部高质量区域。
-
-        关键事实（PSD composite 的根本限制）：
-        - psd-tools 的 composite() **在任何层级都不会输出超出 ancestor.bbox 的效果像素**：
-          即使用父组、PSD root + 大 viewport 调用，发光仍被组 bbox 裁切。
-        - 【验证】layer-142 OuterGlow blur=24，用 parent.composite(viewport=±80px)：
-          仅可见矩形主体（y 80~155），上下各 80px 区域 alpha=0
-        - 因此，溢出的 OuterGlow / DropShadow / Stroke 等效果**只能靠手动渲染**
-
-        策略：
-        1. 用 render_layer_with_effects 在扩展画布上手动逐层渲染（保留溢出效果）
-        2. （TODO）后续可考虑用 group.composite(viewport=grp_bbox) 覆盖内部
-           grp_bbox 区域以提升内部清晰度。当前先不覆盖，避免破坏发光。
-
-        Returns:
-            合成后的 PIL Image（RGBA），尺寸为 grp_w + 2*expand, grp_h + 2*expand
-        """
-        from core.render.effects.effects_renderer import render_layer_with_effects
-
-        grp_w = grp_bbox[2] - grp_bbox[0]
-        grp_h = grp_bbox[3] - grp_bbox[1]
-        ext_w = grp_w + 2 * expand
-        ext_h = grp_h + 2 * expand
-
-        # 手动逐层渲染
-        canvas = np.zeros((ext_h, ext_w, 4), dtype=np.float32)
-        
-        def render_subgroup(sub_grp, depth_offset=0):
-            """递归渲染子组"""
-            # 检查子组bbox是否有效
-            sub_bbox = sub_grp.bbox
-            sub_w = sub_bbox[2] - sub_bbox[0]
-            sub_h = sub_bbox[3] - sub_bbox[1]
-            if sub_w <= 0 or sub_h <= 0:
-                # 空组，跳过渲染
-                return
-            
-            # 对于子组，使用 composite() 渲染（修复底部多余描边问题）
-            try:
-                sub_img = sub_grp.composite(viewport=sub_bbox)
-                if sub_img and sub_img.mode == 'RGBA':
-                    # 计算子组在扩展画布上的位置
-                    sub_x = sub_bbox[0] - grp_bbox[0] + expand
-                    sub_y = sub_bbox[1] - grp_bbox[1] + expand
-                    sub_w = sub_bbox[2] - sub_bbox[0]
-                    sub_h = sub_bbox[3] - sub_bbox[1]
-                    
-                    sub_arr = ImageArrayUtils.pil_to_float_array(sub_img)
-                    
-                    # 合成到 canvas
-                    y0, y1 = sub_y, sub_y + sub_h
-                    x0, x1 = sub_x, sub_x + sub_w
-                    if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
-                        y1 = min(y1, ext_h)
-                        x1 = min(x1, ext_w)
-                        h_copy = y1 - y0
-                        w_copy = x1 - x0
-                        if h_copy > 0 and w_copy > 0:
-                            canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
-                                canvas[y0:y1, x0:x1], sub_arr[:h_copy, :w_copy]
-                            )
-                    return
-            except Exception as e:
-                print(f"{'  ' * (depth + depth_offset)}  ⚠️  子组 composite 失败: {e}")
-            
-            # 降级：递归渲染子图层
-            for child in sub_grp:
-                render_layer(child, depth_offset + 1)
-        
-        def render_layer(layer, depth_offset=0):
-            """递归渲染图层"""
-            nonlocal canvas
-            
-            if not layer.visible or layer.opacity == 0:
-                return
-            
-            if layer.is_group():
-                render_subgroup(layer, depth_offset)
-                return
-            
-            # 普通图层：渲染效果
-            result = render_layer_with_effects(layer)
-            if result is None:
-                return
-            
-            img, eff_bbox = result
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            
-            # 计算图层在扩展画布上的位置
-            layer_x = eff_bbox[0] - grp_bbox[0] + expand
-            layer_y = eff_bbox[1] - grp_bbox[1] + expand
-            layer_w = eff_bbox[2] - eff_bbox[0]
-            layer_h = eff_bbox[3] - eff_bbox[1]
-            
-            layer_arr = ImageArrayUtils.pil_to_float_array(img)
-            
-            # 应用图层不透明度和混合模式
-            layer_arr[:, :, 3] *= (layer.opacity / 255.0)
-            
-            # 合成到 canvas（简化版：仅支持 normal 混合）
-            y0, y1 = layer_y, layer_y + layer_h
-            x0, x1 = layer_x, layer_x + layer_w
-            if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
-                y1 = min(y1, ext_h)
-                x1 = min(x1, ext_w)
-                h_copy = y1 - y0
-                w_copy = x1 - x0
-                if h_copy > 0 and w_copy > 0:
-                    canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
-                        canvas[y0:y1, x0:x1], layer_arr[:h_copy, :w_copy]
-                    )
-        
-        # 渲染所有子图层
-        for child in group_layer:
-            render_layer(child)
-        
-        # 转回 PIL Image
-        result_img = ImageArrayUtils.float_array_to_pil(canvas)
-        return result_img
-
-    def _can_merge_group(self, group_layer: Any) -> bool:
-        """
-        判断组是否可以合并为单张图片。
-
-        条件（全部满足）：
-        1. 组内全是图片图层（子组也递归检查是否全是图片，文本图层不允许）
-        2. 所有图层都不包含需要扩展画布的效果（无外描边、外发光、投影）
-        3. 组的 bbox 不能严重超出画布（避免生成超大图片）
-        4. 至少有一个可见图层
-        
-        注意：如果是按钮组（包含文本+图片），也允许合并（特殊处理）
-        """
-        # 总开关：smart_merge=False 直接放弃组级合图，保留完整组结构
-        if not self.smart_merge:
-            return False
-
-        # 条件3：检查组 bbox 是否严重超出画布
-        # 允许小幅超出（如边缘效果），但不允许尺寸超过画布的 2 倍
-        grp_bbox = group_layer.bbox
-        grp_w = grp_bbox[2] - grp_bbox[0]
-        grp_h = grp_bbox[3] - grp_bbox[1]
-        
-        if grp_w > self.canvas_width * 2 or grp_h > self.canvas_height * 2:
-            return False
-        
-        # 【修复】移除特殊混合模式的阻断逻辑
-        # 对于 SCREEN 等混合模式，composite() 才是正确的处理方式：
-        # - 单独导出会保留原始黑色像素（97%黑色）
-        # - 组级 composite() 会正确执行混合运算，让黑色与下层混合后消失
-        # 因此包含 SCREEN 的组反而**应该**使用 composite() 合并
-        # 注释掉旧的阻断逻辑
-        # if self._should_use_manual_render(group_layer):
-        #     return False
-        
-        # **按钮特殊处理**：如果是按钮组，允许包含文本图层
-        # 按钮组即使有效果溢出，也应该合并（因为按钮就是要文本+背景一起导出）
-        # 只是需要在合并时使用特殊的渲染方式（扩展画布）
-        if self._is_button_group(group_layer):
-            return True  # 按钮组总是允许合并
-        
-        
-        has_visible = False
-        for child in group_layer:
-            # 跳过隐藏和透明图层（不影响判断）
-            if not child.visible or child.opacity == 0:
-                continue
-
-            has_visible = True
-
-            # 如果是子组，递归检查子组是否也全是图片
-            if child.is_group():
-                if not self._can_merge_group(child):
-                    return False
-                continue
-
-            # 条件1：不能有文本图层（普通组）
-            kind = str(child.kind) if hasattr(child, 'kind') else ''
-            if 'type' in kind.lower():
-                return False
-
-            # 条件2：不能有扩展画布的效果
-            if LayerExporter._has_canvas_expanding_effects(child):
-                return False
-
-        return has_visible
-
-    def _can_merge_group_non_text(self, group_layer: Any) -> bool:
-        """
-        判断组是否适合"非文本图层合并为一张背景图 + 文本图层独立导出"。
-
-        条件（全部满足）：
-        1. 组内**直接子图层**不包含子组（有子组则需保留结构交给子组自行处理）
-        2. 组内存在**至少一个可见文本图层**（type 图层），
-           否则走原 `_can_merge_group` 全量合并
-        3. 组内存在**至少一个可见非文本图层**（image/shape/smartobject），
-           否则无背景可合并
-        4. 组的 bbox 不能严重超出画布
-        5. 不是按钮组（按钮组走原"文本+背景一起合"逻辑）
-        """
-        # 总开关：smart_merge=False 放弃"非文本合成背景图"策略
-        if not self.smart_merge:
-            return False
-
-        # 条件4：尺寸保护
-        grp_bbox = group_layer.bbox
-        grp_w = grp_bbox[2] - grp_bbox[0]
-        grp_h = grp_bbox[3] - grp_bbox[1]
-        if grp_w <= 0 or grp_h <= 0:
-            return False
-        if grp_w > self.canvas_width * 2 or grp_h > self.canvas_height * 2:
-            return False
-
-        # 条件5：按钮组特殊保留
-        if self._is_button_group(group_layer):
-            return False
-
-        # 条件1、2、3：只看直接子图层
-        has_text = False
-        has_non_text = False
-        for child in group_layer:
-            if not child.visible or child.opacity == 0:
-                continue
-            # 直接子图层若是组 → 不适用本策略
-            if child.is_group():
-                return False
-            kind = str(child.kind) if hasattr(child, 'kind') else ''
-            if 'type' in kind.lower():
-                has_text = True
-            else:
-                has_non_text = True
-
-        return has_text and has_non_text
-
-    def _collect_text_layers(self, group_layer: Any) -> list[Any]:
-        """收集组内**直接**可见文本图层（type 图层）。"""
-        out: list[Any] = []
-        for child in group_layer:
-            if not child.visible or child.opacity == 0:
-                continue
-            if child.is_group():
-                continue
-            kind = str(child.kind) if hasattr(child, 'kind') else ''
-            if 'type' in kind.lower():
-                out.append(child)
-        return out
-
-    def _merge_group_non_text_as_image(
-        self, group_layer: Any, group_name: str, full_name: str,
-        depth: int, parent_left: int, parent_top: int,
-        clip_bbox: tuple[int, int, int, int] | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        合并组内的非文本图层为单张背景图。
-
-        实现方式：临时将组内所有可见文本图层 `visible` 置为 False，
-        调用 `_merge_group_as_single_image` 复用现有合成流水线（含效果溢出
-        混合渲染策略），完成后恢复 visible。
-        """
-        text_layers = self._collect_text_layers(group_layer)
-        if not text_layers:
-            # 没文本，直接走常规合并
-            return self._merge_group_as_single_image(
-                group_layer, group_name, full_name, depth,
-                parent_left, parent_top, clip_bbox=clip_bbox,
-            )
-
-        saved: list[tuple[Any, bool]] = []
-        try:
-            for t in text_layers:
-                saved.append((t, t.visible))
-                try:
-                    t.visible = False
-                except Exception:
-                    pass
-
-            print(
-                f"{'  ' * depth}🎯 {group_name} "
-                f"(非文本图层合并为背景图，文本独立：{len(text_layers)} 个文本)"
-            )
-            merged = self._merge_group_as_single_image(
-                group_layer, group_name, full_name, depth,
-                parent_left, parent_top, clip_bbox=clip_bbox,
-            )
-            return merged
-        finally:
-            for t, vis in saved:
-                try:
-                    t.visible = vis
-                except Exception:
-                    pass
-
     def _adjust_children_offset(self, children: list[dict], offset_x: int, offset_y: int) -> None:
         """
         递归调整子图层的相对坐标偏移。
-        
+
         当父组的 bbox 被约束时（比如从 -904 变成 0），子图层的相对坐标需要相应调整。
-        
+
         关键原则：
         - 直接子图层（image/text）：调整其相对坐标
         - 子组（group）：只调整组自己的坐标，**不递归调整其子图层**
           因为子组的子图层已经是相对于子组的坐标，不受父组约束影响
-        
+
         Args:
             children: 子图层列表
             offset_x: X 轴偏移量
@@ -1006,169 +198,9 @@ class LayerExporter:
             # 调整当前图层的坐标
             child['left'] += offset_x
             child['top'] += offset_y
-            
+
             # ❌ 不递归调整子组的子图层！
             # 子组的子图层已经是相对于子组的坐标，不应该受父组约束的影响
-
-    def _merge_group_as_single_image(
-        self, group_layer: Any, group_name: str, full_name: str,
-        depth: int, parent_left: int, parent_top: int,
-        clip_bbox: tuple[int, int, int, int] | None = None,
-    ) -> dict[str, Any] | None:
-        """
-        使用混合渲染策略将组内所有图层合并为单张图片导出。
-        
-        混合渲染策略（修复效果质量问题）：
-        1. 检测组内是否有效果溢出（OuterGlow/Stroke等）
-        2. 如果有溢出：
-           a) 在扩展画布上手动逐层渲染（保留溢出效果）
-           b) 用 composite() 覆盖内部区域（获得 PS 原生高质量渲染）
-        3. 如果无溢出：直接使用 composite() 渲染
-        
-        这样可以同时获得：
-        - 内部区域：PS 原生渲染质量（像素级完美）
-        - 外部区域：完整的溢出效果（如外发光、外描边）
-        
-        Args:
-            clip_bbox: 可选的裁剪区域 (left, top, right, bottom)，用于裁剪到父组范围
-        """
-        try:
-            from core.render.effects.effects_renderer import render_layer_with_effects
-
-            # 使用组的 bbox 作为 viewport 进行 composite
-            grp_bbox = group_layer.bbox
-            grp_w = grp_bbox[2] - grp_bbox[0]
-            grp_h = grp_bbox[3] - grp_bbox[1]
-            if grp_w <= 0 or grp_h <= 0:
-                return None
-
-            child_names = [c.name for c in group_layer if c.visible and c.opacity > 0]
-            
-            # 检查是否为按钮组，并输出相应的提示信息
-            is_button = self._is_button_group(group_layer)
-            if is_button:
-                print(f"{'  ' * depth}🔘 按钮组: {group_name} ({len(child_names)}层，文本+背景合并导出)")
-            else:
-                print(f"{'  ' * depth}🔗 合并组图层: {group_name} ({len(child_names)}层: {child_names})")
-
-            # ========== 步骤1：渲染组图层 ==========
-            # 情况1：效果溢出（外描边、外发光等） - 使用混合渲染策略
-            expand = self._calc_group_expand(group_layer)
-            
-            # 【修复】移除特殊混合模式的阻断
-            # 对于 SCREEN 混合模式，composite() 会正确处理混合运算
-            # 之前的逻辑误以为 composite() 会产生黑色背景，但实际上：
-            # - 组级 composite() 会正确执行混合：黑色+下层 → 下层显示
-            # - 单独导出才会保留黑色像素
-            
-            if expand > 0:
-                print(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染策略")
-                # 使用混合渲染策略
-                composite_img = self._render_group_with_hybrid_strategy(
-                    group_layer, grp_bbox, expand, depth
-                )
-            else:
-                # 无溢出，直接使用 composite() 渲染
-                expand = 0
-                # 使用默认参数即可，psd-tools 会正确处理混合模式
-                composite_img = group_layer.composite(viewport=grp_bbox)
-            
-            if composite_img is None:
-                print(f"{'  ' * depth}  ⚠️  composite() 返回 None，回退到逐层导出")
-                return None
-
-            if composite_img.mode != 'RGBA':
-                composite_img = composite_img.convert('RGBA')
-
-            # 保存原始坐标（用于计算相对位置）
-            # 如果使用了混合渲染（expand > 0），图片尺寸是 grp_w+2*expand, grp_h+2*expand
-            # 图片的实际位置需要向左上偏移 expand 像素
-            orig_abs_left = grp_bbox[0] - expand
-            orig_abs_top = grp_bbox[1] - expand
-            actual_w = grp_w + 2 * expand
-            actual_h = grp_h + 2 * expand
-            
-            # 【修复】只裁剪到画布边界，不裁剪到父组边界
-            # 这样可以保留完整的组效果（描边、阴影等），然后在 HTML 中通过扩展父组来容纳
-            adj_left = 0
-            adj_top = 0
-            
-            # 计算扩展后的边界
-            left = grp_bbox[0] - expand
-            top = grp_bbox[1] - expand
-            right = grp_bbox[2] + expand
-            bottom = grp_bbox[3] + expand
-            
-            # 只裁剪到画布边界
-            clip_left, clip_top = 0, 0
-            clip_right, clip_bottom = self.psd.width, self.psd.height
-            
-            cl = max(clip_left, left)
-            ct = max(clip_top, top)
-            cr = min(clip_right, right)
-            cb = min(clip_bottom, bottom)
-            
-            if cr > cl and cb > ct:
-                # 裁剪图片（仅裁剪超出画布的部分）
-                crop_left = cl - left
-                crop_top = ct - top
-                crop_right = composite_img.size[0] - (right - cr)
-                crop_bottom = composite_img.size[1] - (bottom - cb)
-                
-                if crop_right > crop_left and crop_bottom > crop_top:
-                    composite_img = composite_img.crop((crop_left, crop_top, crop_right, crop_bottom))
-                    adj_left = cl - left
-                    adj_top = ct - top
-                    # 更新尺寸
-                    actual_w = cr - cl
-                    actual_h = cb - ct
-                else:
-                    print(f"{'  ' * depth}🚫 {group_name} (裁剪后为空)")
-                    return None
-            else:
-                print(f"{'  ' * depth}🚫 {group_name} (完全在裁剪区域外)")
-                return None
-
-            # 检查是否完全透明
-            img_arr = np.array(composite_img)
-            if img_arr[:, :, 3].max() == 0:
-                print(f"{'  ' * depth}🚫 {group_name} (合并后完全透明)")
-                return None
-
-            self._z_counter += 1
-            # 使用原始坐标计算相对位置
-            rel_left = orig_abs_left - parent_left + adj_left
-            rel_top = orig_abs_top - parent_top + adj_top
-
-            layer_info: dict[str, Any] = {
-                'id': f'layer-{self._z_counter}',
-                'name': group_name,
-                'full_name': full_name,
-                'left': rel_left,
-                'top': rel_top,
-                'width': actual_w,
-                'height': actual_h,
-                'opacity': group_layer.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(group_layer.blend_mode), 'normal'),
-                'z_index': self._z_counter,
-                'type': 'image',
-            }
-
-            # 保存图片（去重）
-            rel_path = self._save_image_dedup(composite_img, group_name, depth)
-            layer_info['image_path'] = rel_path
-
-            visible_count = len(child_names)
-            total_count = len(list(group_layer))
-            print(f"{'  ' * depth}🖼️  {group_name} [合并{visible_count}/{total_count}层 {actual_w}x{actual_h}] → {rel_path}")
-            self.exported_count += total_count
-            return layer_info
-
-        except Exception as e:
-            print(f"{'  ' * depth}❌ 合并组 {group_name} 失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     def _merge_clipping_group(
         self, base_layer: Any, clipped_layers: list[Any],
@@ -1178,6 +210,8 @@ class LayerExporter:
         """
         将 base + clipped 图层合并渲染为单张图片并导出。
         Photoshop 渲染顺序：先在 base 原始内容上合成 clip 层，再应用 base 效果。
+
+        ⚠️ 这是 PSD 像素语义的还原（CSS 无法等价），不是装饰性合图。
         """
         try:
             base_name = base_layer.name or 'merged'
@@ -1310,7 +344,6 @@ class LayerExporter:
 
             if has_effects:
                 # 用合并后的图像替代 base 原始图像，重新渲染效果
-                from core.render.effects.effects_renderer import render_layer_with_effects_on_image
                 final_result = render_layer_with_effects_on_image(
                     base_layer, merged_raw, raw_bbox
                 )
@@ -1381,7 +414,7 @@ class LayerExporter:
 
         组 → { type: 'group', children: [...] }
         普通图层 → { type: 'image' | 'text', ... }
-        剪切蒙版组 → 多个图层合并为单张图片
+        剪切蒙版组 → 多个图层合并为单张图片（PSD 原生语义还原）
 
         子图层的 left/top 会转换为**相对于父组**的坐标。
         根图层（depth=0）使用画布绝对坐标。
@@ -1401,23 +434,10 @@ class LayerExporter:
 
         # 先将图层按 clipping 关系分组
         layers_list = list(layers)
-
-        # 顶层（depth=0）：检测底部连续背景图层并合并
-        bg_layer_ids: set[int] = set()
-        if depth == 0:
-            bg_layers = self._detect_background_layers(layers_list)
-            if bg_layers:
-                merged_bg = self._merge_background_layers(
-                    bg_layers, depth, parent_left, parent_top,
-                )
-                if merged_bg:
-                    result.append(merged_bg)
-                    bg_layer_ids = {id(l) for l in bg_layers}
-
         grouped = self._group_clipping_layers(layers_list)
 
         # 决策链（Chain of Responsibility）驱动：
-        # 每个 item 依次经过 [BackgroundSkip / ClippingGroup / Invisible / Group / Leaf]，
+        # 每个 item 依次经过 [ClippingGroup / Invisible / Group / Leaf]，
         # 首个 can_handle 的 handler 完成处理并终止。
         for item in grouped:
             hctx = HandlerContext(
@@ -1428,7 +448,6 @@ class LayerExporter:
                 parent_left=parent_left,
                 parent_top=parent_top,
                 parent_clip_bbox=parent_clip_bbox,
-                bg_layer_ids=bg_layer_ids,
             )
             result.extend(run_handlers(hctx))
 
@@ -1454,7 +473,7 @@ class LayerExporter:
         clip_bbox: tuple[int, int, int, int] | None = None,
     ) -> dict[str, Any] | None:
         """导出单个图层（图片或文本）
-        
+
         Args:
             clip_bbox: 可选的裁剪区域 (left, top, right, bottom)，用于裁剪到父组范围
         """
@@ -1539,6 +558,201 @@ class LayerExporter:
             self.skipped_count += 1
             return None
 
+    def _export_clipped_layer_against_group_base(
+        self,
+        cl: Any,
+        base_group: Any,
+        layer_name: str,
+        full_name: str,
+        depth: int,
+        parent_left: int = 0,
+        parent_top: int = 0,
+    ) -> dict[str, Any] | None:
+        """
+        导出剪贴蒙版图层（clipped layer），用 base group 的 alpha 通道做剪裁。
+
+        PS 中 clipping=1 的图层只在下方 base 的 alpha 范围内可见。
+        当 base 是 group 时，旧路径走 _export_single_layer 直接导出 clipped 自身的全
+        bbox 像素（如 719×152 的黄色光斑），完全忽略 base group 提供的剪裁形状，
+        导致 HTML 中出现 PSD 视觉里"看不见"的大色块。
+
+        本方法用 base_group.composite() 的 alpha 通道与 cl 自身像素相乘，再裁剪空白边
+        缘，得到与 PS 视觉一致的小图。
+
+        坐标返回与 _export_single_layer 一致：相对父组的 (left, top, width, height)。
+        """
+        try:
+            self._z_counter += 1
+
+            # ── 1. 渲染 cl 自身（含图层效果 / 蒙版）──
+            cl_img = None
+            cl_bbox = cl.bbox
+            try:
+                effect_result = render_layer_with_effects(cl)
+                if effect_result is not None:
+                    eimg, ebbox = effect_result
+                    if eimg is not None and eimg.size[0] > 0 and eimg.size[1] > 0:
+                        cl_img = eimg
+                        cl_bbox = ebbox
+            except Exception:
+                cl_img = None
+
+            if cl_img is None:
+                try:
+                    cl_img = cl.topil()
+                except Exception:
+                    cl_img = None
+
+            if cl_img is None and hasattr(cl, 'composite'):
+                try:
+                    cl_img = cl.composite()
+                except Exception:
+                    cl_img = None
+
+            if cl_img is None or cl_img.size[0] == 0 or cl_img.size[1] == 0:
+                print(f"{'  ' * depth}🚫 {layer_name} (空剪贴层)")
+                self.skipped_count += 1
+                return None
+
+            if cl_img.mode != 'RGBA':
+                cl_img = cl_img.convert('RGBA')
+
+            cl_img = _apply_layer_mask(cl, cl_img, cl_bbox)
+
+            # ── 2. 取 base group 的 alpha mask ──
+            base_alpha_img = None
+            try:
+                base_alpha_img = base_group.composite()
+            except Exception:
+                base_alpha_img = None
+            if base_alpha_img is None or base_alpha_img.size[0] == 0 or base_alpha_img.size[1] == 0:
+                # base 无法 composite → 退回不剪裁的导出（保留旧行为）
+                print(
+                    f"{'  ' * depth}⚠️  {layer_name} 剪贴 base '{base_group.name}' "
+                    f"composite 失败，回退普通导出"
+                )
+                # 通过 _export_single_layer 的逻辑兜底
+                # 此处回滚 z_counter，让 _export_single_layer 自行 +1
+                self._z_counter -= 1
+                return self._export_single_layer(
+                    cl, layer_name, full_name, depth, parent_left, parent_top
+                )
+            if base_alpha_img.mode != 'RGBA':
+                base_alpha_img = base_alpha_img.convert('RGBA')
+            base_bbox = base_group.bbox
+
+            # ── 3. 把 cl 限制到 base bbox 内（位置/尺寸都收缩） ──
+            cl_left, cl_top, cl_right, cl_bottom = cl_bbox
+            base_left, base_top, base_right, base_bottom = base_bbox
+
+            inter_left = max(cl_left, base_left)
+            inter_top = max(cl_top, base_top)
+            inter_right = min(cl_right, base_right)
+            inter_bottom = min(cl_bottom, base_bottom)
+
+            if inter_right <= inter_left or inter_bottom <= inter_top:
+                print(f"{'  ' * depth}🚫 {layer_name} (剪贴交集为空)")
+                self.skipped_count += 1
+                return None
+
+            iw = inter_right - inter_left
+            ih = inter_bottom - inter_top
+
+            # 取 cl_img 内对应交集的 patch
+            cl_arr = np.array(cl_img, dtype=np.float32) / 255.0
+            cl_patch = cl_arr[
+                inter_top - cl_top: inter_top - cl_top + ih,
+                inter_left - cl_left: inter_left - cl_left + iw,
+            ].copy()
+
+            # ── 4. 按 base 形状剪裁 ──
+            # PS 行为差异：
+            #   • base 为"普通组"（NORMAL 等独立合成模式）→ clipped 被 base 的实际 alpha
+            #     形状剪裁（如文字形状）
+            #   • base 为 PASS_THROUGH 组 → 组内不形成独立合成层，剪贴蒙版作用于 base 的
+            #     bbox 矩形区域（即 base 是"窗口"），clipped 在矩形内全部可见
+            # 实测：抽奖活动 PSD "切换按钮" 内 "组 86" 是 PASS_THROUGH，PS composite 时
+            # "图层 660" 黄色辉光铺满整个按钮区域；若按 alpha 剪会得到"文字形状的黄图"，
+            # 与文本图层重叠出现"两个勇士特供"。
+            base_blend_mode = str(getattr(base_group, 'blend_mode', '')) or ''
+            base_is_pass_through = 'pass' in base_blend_mode.lower()
+
+            if not base_is_pass_through:
+                # 普通组：按 base alpha 剪
+                base_arr = np.array(base_alpha_img, dtype=np.float32) / 255.0
+                base_patch_alpha = base_arr[
+                    inter_top - base_top: inter_top - base_top + ih,
+                    inter_left - base_left: inter_left - base_left + iw,
+                    3:4,
+                ]
+                cl_patch[:, :, 3:4] = cl_patch[:, :, 3:4] * base_patch_alpha
+            # PASS_THROUGH 组：保留 cl 在 base bbox 矩形内的原始 alpha（不再乘 base alpha）
+            # 这样 cl 的形状保持自身像素形状，仅被裁到 base 矩形区域内
+
+            # 检查是否完全透明
+            if cl_patch[:, :, 3].max() <= 0.0:
+                print(f"{'  ' * depth}🚫 {layer_name} (剪贴后完全透明)")
+                self.skipped_count += 1
+                return None
+
+            # ── 5. 裁剪透明边缘以缩小 PNG ──
+            alpha_2d = cl_patch[:, :, 3]
+            ys = np.where(alpha_2d > 0)[0]
+            xs = np.where(alpha_2d > 0)[1]
+            if ys.size == 0 or xs.size == 0:
+                print(f"{'  ' * depth}🚫 {layer_name} (剪贴后空)")
+                self.skipped_count += 1
+                return None
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            trimmed = cl_patch[y0:y1, x0:x1]
+
+            # ── 6. 转回 PIL 并保存 ──
+            trimmed_uint8 = np.clip(trimmed * 255.0, 0, 255).astype(np.uint8)
+            out_img = Image.fromarray(trimmed_uint8, mode='RGBA')
+
+            rel_path = self._save_image_dedup(out_img, layer_name, depth)
+
+            # 最终图片左上角的画布绝对坐标
+            abs_left = inter_left + x0
+            abs_top = inter_top + y0
+            width = trimmed_uint8.shape[1]
+            height = trimmed_uint8.shape[0]
+
+            rel_left = abs_left - parent_left
+            rel_top = abs_top - parent_top
+
+            print(
+                f"{'  ' * depth}✂️  {layer_name} "
+                f"(剪贴 {base_group.name}"
+                f"{'(pass-thru/矩形)' if base_is_pass_through else '/alpha'} → "
+                f"[{width}x{height}]) → {rel_path}"
+            )
+
+            layer_info: dict[str, Any] = {
+                'id': f'layer-{self._z_counter}',
+                'name': layer_name,
+                'full_name': full_name,
+                'left': rel_left,
+                'top': rel_top,
+                'width': width,
+                'height': height,
+                'opacity': cl.opacity / 255.0,
+                'blend_mode': BLEND_MODES.get(str(cl.blend_mode), 'normal'),
+                'z_index': self._z_counter,
+                'type': 'image',
+                'image_path': rel_path,
+            }
+            self.exported_count += 1
+            return layer_info
+
+        except Exception as e:
+            print(f"{'  ' * depth}❌ {layer_name} 剪贴导出失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.skipped_count += 1
+            return None
+
     def _export_layer_image(
         self, layer: Any, layer_name: str, depth: int,
         clip_bbox: tuple[int, int, int, int] | None = None,
@@ -1546,7 +760,7 @@ class LayerExporter:
         """
         导出图层为图片文件。
         优先使用效果渲染器（处理描边/阴影/发光等），失败则回退到普通 topil()。
-        
+
         Args:
             clip_bbox: 可选的裁剪区域 (left, top, right, bottom)，用于裁剪到父组范围
         """
@@ -1574,7 +788,7 @@ class LayerExporter:
             except Exception as e:
                 print(f"{'  ' * depth}⚠️  {layer_name} topil 失败: {e}")
                 img = None
-            
+
             # ── 2.1. 如果 topil() 失败，尝试 composite() ──
             # shape 图层（如矩形、圆形、进度条）的 topil() 可能返回 None
             # 但 composite() 可以正常渲染
@@ -1605,7 +819,7 @@ class LayerExporter:
 
         # ── 3. 裁剪到画布边界（保留子图层效果，不裁剪到父组边界）──
         left, top, right, bottom = bbox
-        
+
         # 【修复】只裁剪到画布边界，不裁剪到父组边界
         # 这样可以保留完整的图层效果（如描边），然后在 HTML 中通过扩展父组来容纳
         clip_left, clip_top = 0, 0
@@ -1659,3 +873,404 @@ class LayerExporter:
             'actual_width': img.size[0],
             'actual_height': img.size[1],
         }
+
+    # ------------------------------------------------------------------
+    # PSD 像素语义还原：基于 compose_cluster 的合图（含 merge_full /
+    #   merge_with_text_kept / merge_partial 三条路径）。
+    # 触发条件由 compose_cluster.decide_group_merge() 给出，
+    # 不再使用启发式（按钮关键词 / 文本数量等）。
+    # ------------------------------------------------------------------
+
+    def _calc_group_expand(self, group_layer: Any) -> int:
+        """计算组内所有图层效果溢出所需的最大扩展像素数。"""
+        import math
+        max_expand = 0
+
+        def calc_layer_expand(layer) -> int:
+            if not hasattr(layer, 'effects') or not layer.effects:
+                return 0
+            expand = 0
+            for effect in layer.effects:
+                if not is_effect_active(effect, layer):
+                    continue
+                desc = effect.descriptor
+                name = str(effect)
+                if name == 'Stroke':
+                    size = int(float(desc.get(b'Sz  ', 0)))
+                    style = desc.get(b'Styl')
+                    style_str = ''
+                    if hasattr(style, 'enum'):
+                        style_str = str(style.enum)
+                    if 'OutF' in style_str or 'Outset' in style_str:
+                        expand = max(expand, size + 2)
+                    elif 'CtrF' in style_str or 'Center' in style_str:
+                        expand = max(expand, size // 2 + 2)
+                elif name == 'OuterGlow':
+                    blur = float(desc.get(b'blur', 0))
+                    spread = float(desc.get(b'Ckmt', 0))
+                    radius = blur * (1.0 + spread / 100.0) * 1.5
+                    expand = max(expand, int(math.ceil(radius)) + 2)
+                elif name == 'DropShadow':
+                    blur = float(desc.get(b'blur', 0))
+                    dist = float(desc.get(b'Dstn', 0))
+                    spread = float(desc.get(b'Ckmt', 0))
+                    radius = blur * (1.0 + spread / 100.0) * 1.5
+                    expand = max(expand, int(math.ceil(dist + radius)) + 2)
+            return expand
+
+        def check_layer(layer):
+            nonlocal max_expand
+            if not layer.visible or layer.opacity == 0:
+                return
+            if layer.is_group():
+                for child in layer:
+                    check_layer(child)
+            else:
+                max_expand = max(max_expand, calc_layer_expand(layer))
+
+        for child in group_layer:
+            check_layer(child)
+        return max_expand
+
+    def _render_group_with_hybrid_strategy(
+        self, group_layer: Any, grp_bbox: tuple,
+        expand: int, depth: int,
+    ):
+        """混合渲染策略：手动逐层渲染（保留溢出效果）。
+
+        子组优先用 composite() 渲染；普通图层用 render_layer_with_effects。
+        见 memory 32006918：psd-tools composite() 不会输出超出 ancestor.bbox
+        的效果像素，故溢出区域只能靠手动渲染。
+        """
+        grp_w = grp_bbox[2] - grp_bbox[0]
+        grp_h = grp_bbox[3] - grp_bbox[1]
+        ext_w = grp_w + 2 * expand
+        ext_h = grp_h + 2 * expand
+        canvas = np.zeros((ext_h, ext_w, 4), dtype=np.float32)
+
+        def render_subgroup(sub_grp, depth_offset=0):
+            sub_bbox = sub_grp.bbox
+            sub_w = sub_bbox[2] - sub_bbox[0]
+            sub_h = sub_bbox[3] - sub_bbox[1]
+            if sub_w <= 0 or sub_h <= 0:
+                return
+            try:
+                sub_img = sub_grp.composite(viewport=sub_bbox)
+                if sub_img and sub_img.mode == 'RGBA':
+                    sub_x = sub_bbox[0] - grp_bbox[0] + expand
+                    sub_y = sub_bbox[1] - grp_bbox[1] + expand
+                    sub_arr = ImageArrayUtils.pil_to_float_array(sub_img)
+                    y0, y1 = sub_y, sub_y + sub_h
+                    x0, x1 = sub_x, sub_x + sub_w
+                    if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
+                        y1 = min(y1, ext_h)
+                        x1 = min(x1, ext_w)
+                        h_copy = y1 - y0
+                        w_copy = x1 - x0
+                        if h_copy > 0 and w_copy > 0:
+                            canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
+                                canvas[y0:y1, x0:x1],
+                                sub_arr[:h_copy, :w_copy],
+                            )
+                    return
+            except Exception as e:
+                print(f"{'  ' * (depth + depth_offset)}  ⚠️  子组 composite 失败: {e}")
+            # 降级：递归渲染子图层
+            for child in sub_grp:
+                render_layer(child, depth_offset + 1)
+
+        def render_layer(layer, depth_offset=0):
+            if not layer.visible or layer.opacity == 0:
+                return
+            if layer.is_group():
+                render_subgroup(layer, depth_offset)
+                return
+            result = render_layer_with_effects(layer)
+            if result is None:
+                return
+            img, eff_bbox = result
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            layer_x = eff_bbox[0] - grp_bbox[0] + expand
+            layer_y = eff_bbox[1] - grp_bbox[1] + expand
+            layer_w = eff_bbox[2] - eff_bbox[0]
+            layer_h = eff_bbox[3] - eff_bbox[1]
+            layer_arr = ImageArrayUtils.pil_to_float_array(img)
+            layer_arr[:, :, 3] *= (layer.opacity / 255.0)
+            y0, y1 = layer_y, layer_y + layer_h
+            x0, x1 = layer_x, layer_x + layer_w
+            if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
+                y1 = min(y1, ext_h)
+                x1 = min(x1, ext_w)
+                h_copy = y1 - y0
+                w_copy = x1 - x0
+                if h_copy > 0 and w_copy > 0:
+                    canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
+                        canvas[y0:y1, x0:x1],
+                        layer_arr[:h_copy, :w_copy],
+                    )
+
+        for child in group_layer:
+            render_layer(child)
+
+        return ImageArrayUtils.float_array_to_pil(canvas)
+
+    def _merge_group_as_single_image(
+        self, group_layer: Any, group_name: str, full_name: str,
+        depth: int, parent_left: int, parent_top: int,
+    ) -> dict | None:
+        """整组合成单 PNG（merge_full 路径核心）。
+
+        策略：
+        - 有效果溢出 → 手动逐层渲染（hybrid）
+        - 无溢出 → 直接 group.composite(viewport=grp_bbox)
+
+        见 memory 89140607（混合渲染）/ 96847396（子组用 composite）。
+        """
+        try:
+            grp_bbox = group_layer.bbox
+            grp_w = grp_bbox[2] - grp_bbox[0]
+            grp_h = grp_bbox[3] - grp_bbox[1]
+            if grp_w <= 0 or grp_h <= 0:
+                return None
+
+            child_names = [c.name for c in group_layer if c.visible and c.opacity > 0]
+            print(f"{'  ' * depth}🔗 合并组图层(PSD 合成簇): {group_name} "
+                  f"({len(child_names)}层: {child_names})")
+
+            expand = self._calc_group_expand(group_layer)
+            if expand > 0:
+                print(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染")
+                # ── 双路径：hybrid（保留溢出效果） + 内部 composite 覆盖 ──
+                # hybrid 手动逐层 alpha_composite，无法处理剪贴蒙版关系
+                # （clip=True 图层独立 render_layer_with_effects 出来常常是
+                # 全透明），导致内部内容丢失（典型：SPECIAL 椭圆装饰带消失）。
+                # 解决：用 group.composite(viewport=grp_bbox) 拿 PSD 原生
+                # 渲染（剪贴蒙版关系正确），覆盖 hybrid 输出的内部区域；
+                # 外圈 expand 像素带保留 hybrid 渲染的发光/描边溢出。
+                # 见 memory 32006918 / 89140607。
+                composite_img = self._render_group_with_hybrid_strategy(
+                    group_layer, grp_bbox, expand, depth,
+                )
+                if composite_img is not None:
+                    try:
+                        inner_img = group_layer.composite(viewport=grp_bbox)
+                        if inner_img is not None:
+                            if inner_img.mode != 'RGBA':
+                                inner_img = inner_img.convert('RGBA')
+                            if composite_img.mode != 'RGBA':
+                                composite_img = composite_img.convert('RGBA')
+                            # 先清空内部区域（覆盖式而非合成式），
+                            # 避免 hybrid 错渲染的像素透出 inner 透明位置
+                            grp_w_inner = grp_bbox[2] - grp_bbox[0]
+                            grp_h_inner = grp_bbox[3] - grp_bbox[1]
+                            transparent = Image.new(
+                                'RGBA', (grp_w_inner, grp_h_inner), (0, 0, 0, 0)
+                            )
+                            composite_img.paste(transparent, (expand, expand))
+                            composite_img.paste(inner_img, (expand, expand))
+                    except Exception as e:
+                        print(f"{'  ' * depth}  ⚠️  内部 composite 覆盖失败: {e}")
+            else:
+                composite_img = group_layer.composite(viewport=grp_bbox)
+
+            if composite_img is None:
+                print(f"{'  ' * depth}  ⚠️  composite() 返回 None")
+                return None
+            if composite_img.mode != 'RGBA':
+                composite_img = composite_img.convert('RGBA')
+
+            # 扩展画布的实际左上 = grp_bbox 左上 - expand
+            orig_abs_left = grp_bbox[0] - expand
+            orig_abs_top = grp_bbox[1] - expand
+            actual_w = grp_w + 2 * expand
+            actual_h = grp_h + 2 * expand
+            adj_left = 0
+            adj_top = 0
+
+            # 仅裁剪到画布边界
+            left = grp_bbox[0] - expand
+            top = grp_bbox[1] - expand
+            right = grp_bbox[2] + expand
+            bottom = grp_bbox[3] + expand
+            cl = max(0, left)
+            ct = max(0, top)
+            cr = min(self.psd.width, right)
+            cb = min(self.psd.height, bottom)
+
+            if cr > cl and cb > ct:
+                crop_left = cl - left
+                crop_top = ct - top
+                crop_right = composite_img.size[0] - (right - cr)
+                crop_bottom = composite_img.size[1] - (bottom - cb)
+                if crop_right > crop_left and crop_bottom > crop_top:
+                    composite_img = composite_img.crop(
+                        (crop_left, crop_top, crop_right, crop_bottom)
+                    )
+                    adj_left = cl - left
+                    adj_top = ct - top
+                    actual_w = cr - cl
+                    actual_h = cb - ct
+                else:
+                    print(f"{'  ' * depth}🚫 {group_name} (裁剪后为空)")
+                    return None
+            else:
+                print(f"{'  ' * depth}🚫 {group_name} (完全在画布外)")
+                return None
+
+            img_arr = np.array(composite_img)
+            if img_arr[:, :, 3].max() == 0:
+                print(f"{'  ' * depth}🚫 {group_name} (合并后完全透明)")
+                return None
+
+            self._z_counter += 1
+            rel_left = orig_abs_left - parent_left + adj_left
+            rel_top = orig_abs_top - parent_top + adj_top
+
+            layer_info: dict[str, Any] = {
+                'id': f'layer-{self._z_counter}',
+                'name': group_name,
+                'full_name': full_name,
+                'left': rel_left,
+                'top': rel_top,
+                'width': actual_w,
+                'height': actual_h,
+                'opacity': group_layer.opacity / 255.0,
+                'blend_mode': BLEND_MODES.get(str(group_layer.blend_mode), 'normal'),
+                'z_index': self._z_counter,
+                'type': 'image',
+            }
+
+            rel_path = self._save_image_dedup(composite_img, group_name, depth)
+            layer_info['image_path'] = rel_path
+
+            visible_count = len(child_names)
+            total_count = len(list(group_layer))
+            print(f"{'  ' * depth}🖼️  {group_name} "
+                  f"[合并{visible_count}/{total_count}层 {actual_w}x{actual_h}] → {rel_path}")
+            self.exported_count += total_count
+            return layer_info
+
+        except Exception as e:
+            print(f"{'  ' * depth}❌ 合并组 {group_name} 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    # ------------------------------------------------------------------
+    # merge_with_text_kept / merge_partial 路径所需的辅助合成函数
+    # ------------------------------------------------------------------
+
+    def _collect_recursive_text_layers(self, group_layer: Any) -> list[Any]:
+        """递归收集组内所有可见文本图层（type 图层）。"""
+        out: list[Any] = []
+
+        def walk(node: Any) -> None:
+            if not getattr(node, 'visible', True) or getattr(node, 'opacity', 255) == 0:
+                return
+            if node.is_group():
+                for c in node:
+                    walk(c)
+                return
+            kind = str(getattr(node, 'kind', '') or '').lower()
+            if 'type' in kind:
+                out.append(node)
+
+        for c in group_layer:
+            walk(c)
+        return out
+
+    def _merge_group_non_text_as_image(
+        self, group_layer: Any, group_name: str, full_name: str,
+        depth: int, parent_left: int, parent_top: int,
+    ) -> dict | None:
+        """合并组内"非文本"图层为单张背景图（merge_with_text_kept 路径）。
+
+        实现方式：临时把组内所有递归可见文本图层的 visible 置为 False，
+        调用 _merge_group_as_single_image 复用合成流水线，然后恢复 visible。
+        文本图层稍后在 GroupHandler 里通过普通递归路径独立导出。
+        """
+        text_layers = self._collect_recursive_text_layers(group_layer)
+        if not text_layers:
+            # 没文本，直接走整组合成
+            return self._merge_group_as_single_image(
+                group_layer, group_name, full_name,
+                depth, parent_left, parent_top,
+            )
+
+        print(f"{'  ' * depth}🎯 {group_name} "
+              f"(非文本合并为背景图，文本独立: {len(text_layers)} 个文本)")
+
+        saved: list[tuple[Any, bool]] = []
+        try:
+            for t in text_layers:
+                saved.append((t, t.visible))
+                try:
+                    t.visible = False
+                except Exception:
+                    pass
+            return self._merge_group_as_single_image(
+                group_layer, group_name, full_name,
+                depth, parent_left, parent_top,
+            )
+        finally:
+            for t, vis in saved:
+                try:
+                    t.visible = vis
+                except Exception:
+                    pass
+
+    def _merge_cluster_layers_as_image(
+        self, group_layer: Any, cluster_members: list[Any],
+        group_name: str, full_name: str,
+        depth: int, parent_left: int, parent_top: int,
+        suffix: str = '',
+    ) -> dict | None:
+        """把组内"指定 sibling 子集"合成为单张图（merge_partial 路径）。
+
+        策略：临时隐藏组内不属于 cluster_members 的所有 sibling，
+        然后调用 _merge_group_as_single_image 走标准合成流程；
+        合成结果的 bbox = 这些 sibling 的 union（用 group.composite()
+        + 合成完后裁剪）。最后恢复 visible 状态。
+
+        ⚠️ 调用方必须为**每个**glued cluster 单独调用一次此函数；
+        不要把多个 cluster 的成员合到一个 list 传入——这会跨越独立子项
+        导致 z 序错乱。
+        """
+        # cluster 成员去重（按 id）
+        member_ids = {id(m) for m in cluster_members}
+
+        # 先记 group_layer 自身 bbox（用 force_bbox 是没有的，所以这里靠
+        # composite() 自动按 visible 子的 union 出图——隐藏掉非 cluster
+        # sibling 后，psd-tools 的 group.composite() 给出的 bbox 会自动
+        # 收缩到 cluster 的视觉 union，但效果溢出会被裁。所以我们仍走
+        # _merge_group_as_single_image 的统一逻辑：用整组 bbox + expand）。
+
+        # 隐藏所有不在 cluster 内的 sibling（直接子）
+        saved: list[tuple[Any, bool]] = []
+        for c in group_layer:
+            if id(c) in member_ids:
+                continue
+            if not c.visible:
+                continue
+            saved.append((c, c.visible))
+            try:
+                c.visible = False
+            except Exception:
+                pass
+
+        try:
+            mname = f"{group_name}{suffix}" if suffix else group_name
+            mfull = f"{full_name}{suffix}" if suffix else full_name
+            print(f"{'  ' * depth}🧬 合并 cluster: {mname} "
+                  f"({len(cluster_members)}层: {[m.name for m in cluster_members]})")
+            return self._merge_group_as_single_image(
+                group_layer, mname, mfull,
+                depth, parent_left, parent_top,
+            )
+        finally:
+            for c, vis in saved:
+                try:
+                    c.visible = vis
+                except Exception:
+                    pass

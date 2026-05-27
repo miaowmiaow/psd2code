@@ -70,7 +70,8 @@ description: 将 PSD 设计稿转换为多种前端代码（HTML / React / Vue�
 - **容器背景吸收 pass**：DOM 重构后再扫一遍，把同尺寸大背景剥到父 `background-image`，多张本地 PNG 直接合成单图（透传 `images_dir`）。
 - **Stack→Col 反向升级**：N=2 时按"X 重叠 ≥ 0.95 且 Y 间距 ≤ 50px"双强信号判 v-col。
 
-**Step 1.2：图层扁平化（统一通道）**（`image_layer_flatten.py`，2026-04-30 重构）
+**Step 1.2：图层扁平化（统一通道，2026-05-27 起默认关闭）**（`image_layer_flatten.py`，2026-04-30 重构）
+- ⚠️ **默认关闭**（`FlattenConfig.enabled = False`）。本步骤会把容器内 N 个 image 子合成为单张 PNG 并删除全部子 DOM，过于粗暴——典型反例：抽奖活动「游泳圈」组里"游泳圈底图(pixel) + 数字框矩形(shape) + 礼盒文字(被栅格化的 TypeLayer)"3 个语义独立元素会被合并为单图，丧失独立改色/换文案/绑事件能力。需要时通过 CLI `--enable-image-layer-flatten` 或 `FlattenConfig(enabled=True)` 显式启用。
 - 历史上"合并图片以减少 DOM/CSS/PNG 请求"分散在四个分支（merge_siblings / collapse_into_parent / absorb_into_relative / merge_parent_bg），合并为**单一递归函数**。
 - 对每个候选容器，把"容器自身 background-image（如有）+ 全部直接 image 子的 background-image"按 z 序合成单张 PNG，写回容器自身，删除子 div + 子 CSS。**容器一律保留**（不消除 DOM 层级，不破坏外层布局/虚拟 wrapper 语义）。
 - 后序遍历 + 多轮扫描（最多 5 轮），实现"子图合并 → 父再吸收为背景"的链式简化。
@@ -147,9 +148,13 @@ python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --css-style 
 # CI 基线对比：禁用 CssPretty，回到 dict_to_css 字母序机械渲染
 python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --no-css-pretty
 
-# 关闭全部智能合图（4 类一把梭：装饰组合并 / 底部背景合并 / ImageLayerFlatten / 多 url 背景合成）
-# 每个 PSD 图层保留独立 DOM + CSS 规则，便于 1:1 诊断切图问题或像素回归对齐
+# 关闭 LayoutOptimizer 链路的「多 url 背景内联合成」（DOMRestructure 内联 + background_flatten 文本兜底）
+# 这两项不删 DOM 子节点，副作用小，默认开启；加该参数后每条 `background: url(a), url(b)` 保持原样，便于 1:1 诊断
 python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --no-smart-merge
+
+# 显式启用 ImageLayerFlatten（默认关闭，2026-05-27 起）
+# 会把容器内 N 个 image 子合成单张 PNG 并删除所有子 DOM，仅在确认整组是纯装饰时启用
+python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --enable-image-layer-flatten
 
 # 运行 React 产物
 cd output/<psd_stem>/react

@@ -115,7 +115,6 @@ def parse_psd_to_ir(
     psd_path: str | Path,
     output_dir: str | Path,
     psd: Optional[PSDImage] = None,
-    smart_merge: bool = True,
 ) -> tuple[Document, LayerExporter, list[dict[str, Any]]]:
     """Parse a PSD file into an IR :class:`Document`.
 
@@ -123,10 +122,11 @@ def parse_psd_to_ir(
     and returns both the IR and the underlying legacy artifacts so downstream
     stages can reuse them without re-parsing the PSD.
 
-    Args:
-        smart_merge: 是否启用 PSD 图层级「智能合图」（装饰组合成单 PNG +
-            画布底部连续背景合并）。False 时所有组逐层导出、底部背景不合并。
-            透传给 :class:`LayerExporter`。
+    解析阶段保持纯粹：1 PSD 图层 = 1 layer_info（叶图层）或 group_info（组），
+    不做任何"装饰性合图"。任何"合图收益"由下游 LayoutOptimizer
+    （HTML 后处理阶段）按需进行，可通过 CLI ``--no-smart-merge`` 关闭。
+    唯一例外是 PSD 原生剪贴蒙版（CSS 无法等价还原），由 :class:`LayerExporter`
+    内部处理。
 
     Returns:
         (document, layer_exporter, legacy_layers_tree)
@@ -136,7 +136,7 @@ def parse_psd_to_ir(
     if psd is None:
         psd = PSDImage.open(str(psd_path))  # type: ignore[misc]
 
-    exporter = LayerExporter(psd, output_dir, smart_merge=smart_merge)
+    exporter = LayerExporter(psd, output_dir)
     legacy_tree = exporter.export_layers(psd)
     exporter.verify_export()
 

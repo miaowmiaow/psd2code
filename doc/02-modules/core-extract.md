@@ -9,8 +9,9 @@
 ```
 core/extract/
 ├── __init__.py
-├── layer_exporter.py  # ★ LayerExporter（编排 + 私有渲染方法）
+├── layer_exporter.py   # ★ LayerExporter（编排 + 私有渲染方法）
 ├── image_ops.py        # 底层：裁剪 / 蒙版 / numpy alpha 合成
+├── compose_cluster.py  # ★ PSD 原生合成簇检测（R1-R5 规则 + decide_group_merge）
 └── handlers.py         # ★ Chain of Responsibility：5 个决策 Handler
 ```
 
@@ -22,7 +23,7 @@ core/extract/
 
 ```python
 class LayerExporter:
-    def __init__(self, psd, output_dir, smart_merge: bool = True):
+    def __init__(self, psd, output_dir):
         self.psd = psd
         self.output_dir = output_dir
         self.images_dir = output_dir / 'images'
@@ -32,7 +33,6 @@ class LayerExporter:
         self._z_counter = 0
         self._image_hash_map: dict[md5, rel_path] = {}  # 去重
         self._dedup_count = 0
-        self.smart_merge = smart_merge                   # 图层级合图总开关（见下文）
 
     # 公开 API
     def export_layers(self, container, parent_name='', depth=0,
@@ -42,8 +42,8 @@ class LayerExporter:
     # 内部 API（被 handlers 调用）
     def _export_single_layer(layer, name, full_name, depth, ...) -> dict | None
     def _merge_group_as_single_image(group, name, full_name, ...) -> dict | None
+    def _merge_cluster_layers_as_image(layers, name, full_name, ...) -> dict | None
     def _merge_group_as_image(group, ...)                  # 渲染为 PIL 后合并
-    def _can_merge_group(group) -> bool
     def _save_image_dedup(img, name, depth) -> str         # 返回 rel path
     # ... 其他 _helper
 ```
@@ -108,7 +108,7 @@ def run_handlers(ctx, handlers=DEFAULT_HANDLERS) -> list[dict]:
 | `BackgroundSkipHandler` | item 已登记在 `bg_layer_ids` | 静默跳过（不 produce） |
 | `ClippingGroupHandler`  | `isinstance(item, tuple)` | 合并 base+clipped；无法合并则递归 |
 | `InvisibleLayerHandler` | `not visible or opacity==0` | 计入 skipped |
-| `GroupHandler` | `layer.is_group()` | 先试 `_merge_group_as_single_image`；合并失败则递归 `export_layers(child)` |
+| `GroupHandler` | `layer.is_group()` | 调 `compose_cluster.decide_group_merge()` 取 4 个 action 分支处理（详见 [§ `decide_group_merge` 4 个 action](#decide_group_merge-4-个-action)） |
 | `LeafLayerHandler` | 叶图层 | 文本→TextNode；旋转文本→Image；其他→Image |
 
 ### 扩展：新增一条决策
@@ -127,39 +127,68 @@ _alpha_composite_numpy(base_arr, overlay_arr, ...) -> arr
 
 复用场景：组合成、剪切蒙版合成等。
 
-## 背景合并链路
+## `compose_cluster.py`：PSD 原生合成簇决策
 
-当画布底部有若干"覆盖整个画布且 normal 混合"的图层，`LayerExporter`
-会自动把它们合并为一张背景图（`_detect_background_layers` +
-`_merge_background_layers`），然后把这些原图层 id 加入 `bg_layer_ids`，
-让 `BackgroundSkipHandler` 跳过后续重复导出。
+> **核心定位**：替代历史上的"三道闸门"（`_is_button_group / _can_merge_group / _can_merge_group_non_text`）—— 不再用启发式（按钮关键词、子节点数量、文本数量等）猜测"该不该合图"，而是基于 PSD 自身**硬性合成语义**给出决策。
 
-## 智能合图总开关：`smart_merge`
+### R1–R5 规则
 
-`LayerExporter.__init__(psd, output_dir, smart_merge: bool = True)` 暴露一个
-**图层级合图总开关**，等价于 CLI `--no-smart-merge` 的 PSD 端切面。`smart_merge=False` 时：
+`detect_compose_clusters(group_layer)` 把组的直接子序列（按 PSD 自底向上）切成若干 `ComposeCluster`，每个 cluster 表示"必须一起 composite 才不偏离 PSD 视觉"的最小单位。划簇规则：
 
-- `_can_merge_group(group)` 直接返回 `False`（装饰组不再合成单张 PNG）
-- `_can_merge_group_non_text(group)` 直接返回 `False`（"非文本→背景图 + 文本独立"策略禁用）
-- `_detect_background_layers()` 直接返回 `[]`（画布底部连续背景合并禁用）
+| 规则 | 触发条件 | 含义 |
+| ---- | -------- | ---- |
+| **R1** 剪贴蒙版 | `clipping == 1` | 剪贴层只能在 base 的 alpha/bbox 范围内显示 → 与下方最近的 non-clipping base 同簇 |
+| **R2** 非 NORMAL 混合 | blend ∉ {NORMAL, DISSOLVE, PASS_THROUGH} | OVERLAY / MULTIPLY / SCREEN / LINEAR_DODGE 等通过公式修改下层像素 → 必须与下方一起合成。**非 clipping 的 R2 还会"回吸"此前所有 cluster**（其合成对象是 PT 组下方全部已合像素） |
+| **R3** PASS_THROUGH 子组 + 上下文依赖 | PT 组内含调整层 / 非 NORMAL blend / 跨组剪贴 | PT 组不形成独立合成层，内部依赖会穿透组边界 → 与上下邻居同簇。判定细化为 C1–C5 五类触发条件，见 `_group_contains_context_dependent` |
+| **R4** 调整层 | adjustment kind | 曲线/色阶/曝光等修改下方所有像素 → 与下方一起合成（仅当下方 cluster 已被 R1/R2/R3 锁定时才合并；否则单独成簇） |
+| **R5** 浏览器不可还原（推论） | ≥1 个 cluster 含 ≥2 元素 | 浏览器 alpha 堆叠只能还原 NORMAL → 凡是被 R1-R4 粘连成 ≥2 元素的 cluster 都必须合成单张 PNG |
 
-三条闸门都在方法最前面，**不影响其它逻辑路径**，切换开关不需要修改任何其它代码。
+### `decide_group_merge(group_layer)` 4 个 action
 
-**不在此开关范围**（由 LayoutOptimizer 层单独控制，见
-[`../03-topics/layout-optimizer.md`](../03-topics/layout-optimizer.md) 的
-`images_dir` / `flatten_config` 小节）：
+`GroupHandler.handle` 直接消费这 4 个 action：
 
-- `ImageLayerFlatten`（Step 1.2）"容器 bg + image 子"的合并
-- `DOMRestructure` 的多 url 背景内联合成
-- `background_flatten.flatten_multi_url_backgrounds` 文本兜底
+| action | 触发 | LayerExporter 调用 |
+| ------ | ---- | ------------------ |
+| `merge_full` | 单 cluster 全非文本；或单 cluster + 文本 但触发"clipping over text base" 升级 | `_merge_group_as_single_image(layer)` |
+| `merge_with_text_kept` | 单 cluster + ≥1 文本 + ≥1 非文本视觉成员 | `_merge_group_as_single_image(layer)`（非文本合成为背景）+ 文本独立 export |
+| `merge_partial` | ≥2 cluster 且存在 ≥2 元素 glued cluster | **每个 glued cluster** 调一次 `_merge_cluster_layers_as_image(members)`；singleton independent cluster 保留独立递归。⚠️ 多个 glued cluster 之间是 NORMAL 堆叠，**绝不可合到同一张图** |
+| `no_merge` | 唯一 cluster 全文本；唯一单元素 cluster；全单元素 cluster；空组 | 完全递归 `export_layers(child)` |
 
-CLI 入口 `psd_to_code.py --no-smart-merge` 会把 `smart_merge=False` 写入
-`PipelineContext`，由 `ParseToIrStage` 透传到 `parse_psd_to_ir(..., smart_merge=False)`
-再传给 `LayerExporter`；`LayoutOptimizeStage` 同时读取该值，相应地传
-`images_dir=None` 和 `FlattenConfig(enabled=False)`、并跳过 `flatten_multi_url_backgrounds`，
-确保"一键关全部 4 类合图"的语义一致。
+`merge_partial` 路径的内部不变式（关键，详见 `handlers.py` 注释）：
 
-旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False)` 行为等价。
+- cluster bg 与 indep sibling 必须**按 PSD sibling 顺序交错** export（不能集中前置），避免下方 indep sibling 的 z 反盖到 cluster bg 之上
+- cluster bg z-index 必须严格小于"位于 anchor_high 位置及之后的 indep sibling 的 z"，且严格大于 anchor_low 之前的 indep sibling 的 z
+
+## 解析阶段：纯解析、不做装饰性合图
+
+`LayerExporter` 是**纯解析版**：1 PSD 图层 = 1 `layer_info`（叶图层）或 1 `group_info`（组），解析阶段**不**做任何启发式装饰合图。
+
+历史上的旧三道闸门 `_can_merge_group / _can_merge_group_non_text / _is_button_group`（按钮关键词命中 / 子节点数量上限 / 全非文本判定）以及 `_merge_background_layers / _detect_background_layers` 等"画布底部连续背景合并"逻辑已**全部移除**：
+
+- 启发式合图（多 PNG 折叠 / 装饰组拼图） → 下沉到 LayoutOptimizer（详见 [§ 智能合图开关](#智能合图开关cli--api)）
+- 真正不可还原的合图（PSD 原生剪贴蒙版 / 非 NORMAL 混合 / 调整层 / PT 组上下文依赖） → 上移到 `compose_cluster.py` 用硬性规则 R1-R5 判定
+
+唯一仍在解析阶段就触发的合图：`compose_cluster` R1-R5 给出的 `merge_full / merge_with_text_kept / merge_partial`，由 `_merge_group_as_single_image` 或 `_merge_cluster_layers_as_image` 落盘为 PNG。这些都对应**浏览器无法用 alpha 堆叠还原的 PSD 视觉**，与"按钮看着像图所以合一张"等启发式有本质区别。
+
+## 智能合图开关（CLI / API）
+
+合图（多 PNG → 1 PNG、多 div 折叠为 1 div）的优化全部由 LayoutOptimizer 接管，对应 2 个 CLI 开关、2 个 ctx key：
+
+| CLI 开关 | ctx key | 默认 | 影响范围（仅 LayoutOptimizer 链路） |
+| -------- | ------- | ---- | ----------------------------------- |
+| `--no-smart-merge` | `smart_merge=False` | `True`（默认开） | 关闭「多 url 背景内联合成」：`DOMRestructure._try_inline_compose_backgrounds`（容器内多张装饰背景合成为单图写到自身 `background-image`，**不**删除 DOM 子节点）+ `background_flatten.flatten_multi_url_backgrounds` 文本兜底 |
+| `--enable-image-layer-flatten` | `image_layer_flatten_enabled=True` | `False`（**默认关**） | 启用 Step 1.2 `ImageLayerFlatten`：把容器内 N 个 image 子合成单张 PNG 并**删除所有子 DOM**。默认关闭原因：会把语义独立的栅格化元素和真正装饰像素一起合并，可维护性损失不可接受（详见 [`../03-topics/layout-optimizer.md`](../03-topics/layout-optimizer.md) Step 1.2） |
+
+**两个开关完全解耦**——`--no-smart-merge` 只影响多 url 背景合成（不删 DOM），`--enable-image-layer-flatten` 只控制 Step 1.2（会删 DOM）。
+
+CLI 入口 `psd_to_code.py` 把对应值写入 `PipelineContext`：
+
+- `args.no_smart_merge` → `ctx.set("smart_merge", False)`
+- `args.enable_image_layer_flatten` → `ctx.set("image_layer_flatten_enabled", True)`
+
+`LayoutOptimizeStage` 读取两个 ctx key，相应地构造 `images_dir`（`None` 时禁用主路径多 url 合成）和 `FlattenConfig(enabled=...)`，并在 `smart_merge=False` 时跳过 `flatten_multi_url_backgrounds` 兜底。
+
+旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False, image_layer_flatten_enabled=True)` 行为与 CLI 等价。两个参数都不会传给 `LayerExporter`——解析阶段始终是纯解析。
 
 ## 与 IR 的连接
 

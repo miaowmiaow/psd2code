@@ -77,17 +77,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-smart-merge",
         action="store_true",
         help=(
-            "Disable all smart image merging across the pipeline: "
-            "(1) LayerExporter group → single PNG (_can_merge_group / "
-            "_can_merge_group_non_text); "
-            "(2) LayerExporter canvas bottom background merge "
-            "(_merge_background_layers); "
-            "(3) LayoutOptimizer step 1.2 ImageLayerFlatten (container + image "
-            "children composition); "
-            "(4) LayoutOptimizer DOMRestructure multi-url background inline "
-            "composition + background_flatten textual fallback. "
-            "Useful for 1:1 PSD-layer debugging (keeps every layer as its own "
-            "DOM/CSS rule)."
+            "Disable LayoutOptimizer-stage multi-url background inline composition: "
+            "(1) DOMRestructure multi-url background inline composition; "
+            "(2) background_flatten textual fallback. "
+            "These only collapse multiple background-image url() layers into "
+            "a single PNG on the SAME container (no DOM child removal), so "
+            "the side effect is small and they remain ON by default. "
+            "The parsing stage (LayerExporter) is already pure (1 PSD layer = "
+            "1 layer_info / 1 PNG, no decorative merging at all), so this flag "
+            "only affects HTML post-processing. Useful for 1:1 PSD-layer debugging."
+        ),
+    )
+    parser.add_argument(
+        "--enable-image-layer-flatten",
+        action="store_true",
+        help=(
+            "Enable LayoutOptimizer step 1.2 ImageLayerFlatten "
+            "(container + image-children composition into a single PNG, "
+            "deleting all child DOM nodes). "
+            "DISABLED by default since 2026-05-27 because it merges DOM "
+            "nodes too aggressively (e.g. raster shape + rasterized type-layer "
+            "+ pixel are flattened into one PNG, losing per-element editability). "
+            "Only enable when you know the page is purely decorative."
         ),
     )
     return parser.parse_args(argv)
@@ -124,9 +135,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_css_pretty:
         ctx.set("css_pretty_enabled", False)
     ctx.set("css_pretty_style", args.css_style)
-    # --no-smart-merge：ParseToIrStage + LayoutOptimizeStage 都会读这个值
+    # --no-smart-merge：仅 LayoutOptimizeStage 会读这个值（解析阶段已不做合图）
     if args.no_smart_merge:
         ctx.set("smart_merge", False)
+    # --enable-image-layer-flatten：显式打开 ImageLayerFlatten（默认关闭）
+    if args.enable_image_layer_flatten:
+        ctx.set("image_layer_flatten_enabled", True)
 
     print(f"[psd2code] target={target_name}  psd={psd_path}")
     try:
