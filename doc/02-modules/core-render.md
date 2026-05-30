@@ -44,6 +44,27 @@ def render_layer_with_effects_on_image(img, bbox, layer, ...) -> tuple[Image, bb
 上游代码（`LayerExporter`）**只**使用这两个入口。
 新增效果时应让它们自动被 Facade 调起，而不是在上游逐个判断。
 
+### 形状层底图获取策略
+
+`render_layer_with_effects` 内部对 shape 图层的底图获取逻辑：
+
+```
+topil() 不为 None → 直接使用
+    ↓ 为 None
+shape + 有 Stroke effect → _render_shape_base_from_fill()（自渲染）
+shape + 无 Stroke effect → composite()（vector path 更准确）
+非 shape → composite()
+```
+
+`_render_shape_base_from_fill()` 用 SoCo 纯色 + origination 几何合成基础图，
+绕开 composite 的描边覆盖 bug。仅在有 Stroke 效果时启用——无描边时 composite()
+的 vector path 渲染比 origination 参数更准确。
+
+辅助函数 `_draw_rounded_rect_variable()` 支持四角不同半径的圆角矩形，
+实现 CSS border-radius 规范的缩放规则（相邻角半径之和超过边长时等比缩小）。
+
+详见 [`../05-conventions/known-pitfalls.md`](../05-conventions/known-pitfalls.md) #27。
+
 ## 各效果渲染器
 
 | 文件 | 渲染器 | 是否需要扩展画布 |
@@ -91,6 +112,42 @@ class GroupRenderer:
 
 详见 [`../03-topics/group-rendering.md`](../03-topics/group-rendering.md) 和
 [`../05-conventions/known-pitfalls.md`](../05-conventions/known-pitfalls.md)。
+
+## `adjustments_patch.py`（psd-tools 补丁）
+
+位置：`core/render/adjustments_patch.py`
+
+```python
+# 模块级自动注册：import 即生效
+import scripts.core.render.adjustments_patch
+```
+
+此模块对 psd-tools 的 composite 管线进行 monkey-patch，修复上游已知 bug
+或补充缺失功能。**import 即自动注册**，无需显式调用。
+
+### 补丁清单
+
+| 补丁 | 修复对象 | 说明 |
+| ---- | -------- | ---- |
+| `apply_blackandwhite` | `ADJUSTMENT_FUNC['blackandwhite']` | psd-tools 原生不支持 Black & White 调整层，此补丁实现完整的色相加权灰度转换算法（含 tint 着色） |
+| `_patched_draw_stroke_effect` | `draw_stroke_effect` | 修复全填满形状（shape 全 1）时 scharr 边缘检测→NaN→mask 100% 覆盖的 bug，详见 [known-pitfalls #26](../05-conventions/known-pitfalls.md#26) |
+
+### 注入机制
+
+- **ADJUSTMENT_FUNC** 是简单字典注入：`ADJUSTMENT_FUNC['blackandwhite'] = apply_blackandwhite`
+- **draw_stroke_effect** 需要修改 `Compositor._apply_stroke_effect.__globals__`
+  字典（因为函数引用在导入时已绑定到 `__globals__`，单纯修改模块属性不生效）
+
+### 扩展指南
+
+新增补丁时：
+1. 在此文件中实现修复函数
+2. 在 `register_*` 函数中注册
+3. 确保模块级调用（文件底部的 `register_*()` 调用）
+4. 在 `known-pitfalls.md` 记录根因和修复方案
+5. 在 `tests/test_adjustments_patch.py` 添加对应测试
+
+---
 
 ## 工具依赖
 

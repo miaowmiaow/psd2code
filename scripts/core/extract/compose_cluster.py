@@ -183,25 +183,56 @@ def _classify_layer(layer: Any) -> LayerKind:
     return LayerKind.PIXEL
 
 
+def _bbox_contains(outer: Any, inner: Any) -> bool:
+    """判断 outer 的 bbox 是否完全包含 inner 的 bbox。
+
+    bbox 格式：(left, top, right, bottom)。
+    若 inner 完全在 outer 内部（含边缘重合），返回 True。
+    任何异常（无 bbox 属性、bbox 为 None 等）返回 False（保守不跳过）。
+    """
+    try:
+        ob = outer.bbox
+        ib = inner.bbox
+        if ob is None or ib is None:
+            return False
+        # inner 面积为零时不做包含判定
+        if ib[2] <= ib[0] or ib[3] <= ib[1]:
+            return False
+        return (ob[0] <= ib[0] and ob[1] <= ib[1]
+                and ob[2] >= ib[2] and ob[3] >= ib[3])
+    except Exception:
+        return False
+
+
 def _group_contains_context_dependent(group_layer: Any) -> bool:
     """递归判断组内是否含"依赖外部上下文"的图层。
 
     一个图层若其视觉贡献会"穿透"PASS_THROUGH 组边界、与组外像素发生混合，
     则它使所在 PT 组成为"上下文依赖"。
 
-    判定（精细化版，2026-05-27 修订；基于两个真实 PSD 230 个 PT 组的实证）：
+    判定（精细化版，2026-05-30 修订；基于两个真实 PSD 230 个 PT 组的实证）：
 
     NORMAL 组（非 PASS_THROUGH）形成独立合成层 → 内部依赖不外溢 → 跳过。
     PASS_THROUGH 子组 → 递归判定。
 
     对叶子图层，触发条件为以下任一：
 
-      C1) 调整层（adjustment layer）
+      C1) 调整层（adjustment layer）且非 clipping
           调整层无 alpha 限制，作用于下方所有可见像素，必然依赖外部上下文。
+          **例外（2026-05-30 修订）**：clipping=1 的调整层，只要能找到 clip
+          base（下方第一个非 clipping sibling）→ 效果被 base.alpha 锁定，
+          不会外溢 → 不触发。PS 中 clipping 层的效果严格受 base alpha 限制，
+          无论 base 是 pixel 叶子还是组（PT/NORMAL 均可）。
+          典型安全场景：「黑白 1」调整层 clip 到「按钮」PT 子组上。
 
       C2) 非 NORMAL blend 且非 clipping
           没有 alpha 限定，blend 会与同父 sibling 中下方所有可见像素混合，
           跨越组边界。
+          **例外（2026-05-30 新增 bbox 包含检查）**：若该非 NORMAL 图层的
+          bbox 完全被其下方某个 NORMAL、非 clipping 的 pixel sibling 包含，
+          说明该 blend 效果只作用于该 sibling 的像素区域内（典型：装饰性
+          LINEAR_BURN 渐变层叠在大面积背景色块上），其视觉贡献不会穿透
+          组边界影响更下方的组外像素 → 不触发 C2。
 
       C3) 非 NORMAL blend + clipping=1，但 clip base 是"组"（PT 或 NORMAL）
           base 是子组合成结果，子组本身可能含 PT/调整等复杂语义，保守认为
@@ -224,6 +255,9 @@ def _group_contains_context_dependent(group_layer: Any) -> bool:
         return False
 
     has_non_clip_below = False
+    # 收集所有可见、非 clipping 的 NORMAL pixel sibling，用于 C2 bbox 包含检查
+    normal_pixel_siblings: list[Any] = []
+
     for i, c in enumerate(children):
         if not getattr(c, 'visible', True) or getattr(c, 'opacity', 255) == 0:
             continue
@@ -234,7 +268,9 @@ def _group_contains_context_dependent(group_layer: Any) -> bool:
                     return True
             else:
                 # NORMAL 等独立合成组：不向外暴露内部依赖
-                continue
+                # 但组也可以作为 bbox 包含检查的候选（组有合成 bbox）
+                if not _is_clipping(c):
+                    normal_pixel_siblings.append(c)
             # 组本身也作为 non-clip sibling 占位
             if not _is_clipping(c):
                 has_non_clip_below = True
@@ -244,6 +280,28 @@ def _group_contains_context_dependent(group_layer: Any) -> bool:
 
         # C1: 调整层
         if _is_adjustment(c):
+            # C1 例外：clipping=1 的调整层 → 效果被锁在 clip base 的 alpha 内
+            # Photoshop 合成模型中，clipping 层的效果严格受 base alpha 限制，
+            # 无论 base 是 pixel 叶子层还是组（PT/NORMAL 组作为 clip base 时
+            # PS 会先合成组输出，再让 clipping 层基于组输出 alpha 裁剪）。
+            if _is_clipping(c):
+                # 找 clip base：下方第一个非 clipping、visible、opacity>0 的 sibling
+                adj_base = None
+                for j in range(i - 1, -1, -1):
+                    sib = children[j]
+                    if not getattr(sib, 'visible', True):
+                        continue
+                    if getattr(sib, 'opacity', 255) == 0:
+                        continue
+                    if _is_clipping(sib):
+                        continue
+                    adj_base = sib
+                    break
+                if adj_base is not None:
+                    # 有 base（无论是 pixel sibling 还是任何类型的组）
+                    # → clipping 锁定效果在 base alpha 内 → 安全，不触发
+                    continue
+                # 无 base（异常情况）→ 保守触发
             return True
 
         clip = _is_clipping(c)
@@ -252,8 +310,19 @@ def _group_contains_context_dependent(group_layer: Any) -> bool:
         if not normal:
             # 非 NORMAL blend 路径
             if not clip:
-                # C2: 非 clipping → 无 alpha 限定 → 必然外溢
-                return True
+                # C2: 非 clipping → 无 alpha 限定 → 可能外溢
+                # **bbox 包含例外**：如果该图层完全被下方某个 NORMAL pixel
+                # sibling 的 bbox 包含，则 blend 效果局限在该 sibling
+                # 像素区域内（不穿透组边界），不触发。
+                contained = any(
+                    _bbox_contains(sib, c)
+                    for sib in normal_pixel_siblings
+                )
+                if not contained:
+                    return True
+                # 被包含 → 安全，不触发 C2；但该图层自身不作为 non-clip
+                # sibling（它是非 NORMAL，不能作为其他层的 containing base）
+                continue
             # clipping=1：找下方第一个非 clipping、visible、opacity>0 的 sibling 作为 clip base
             base = None
             for j in range(i - 1, -1, -1):
@@ -282,6 +351,8 @@ def _group_contains_context_dependent(group_layer: Any) -> bool:
             return True
         if not clip:
             has_non_clip_below = True
+            # 将 NORMAL 非 clipping 的叶子层加入候选列表
+            normal_pixel_siblings.append(c)
     return False
 
 

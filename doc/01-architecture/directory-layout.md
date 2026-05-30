@@ -44,8 +44,6 @@ psd2code/
     │
     ├── core/                            # 【前端】PSD → IR
     │   ├── __init__.py
-    │   ├── converter.py                 # 历史 PSDToHTMLConverter（回归兜底）
-    │   │
     │   ├── ir/                          # pydantic IR
     │   │   ├── __init__.py              # re-export
     │   │   ├── document.py              # Document（根）
@@ -192,6 +190,7 @@ psd2code/
 - `core/render/effects/effects_renderer.py` —— Facade 入口
 - `core/render/effects/<xxx>_renderer.py` —— 具体效果
 - `core/render/layer_renderer.py` —— 组级扩展渲染
+- `core/render/adjustments_patch.py` —— psd-tools 补丁（调整层 + 描边效果修复）
 
 ### 改 HTML 输出
 

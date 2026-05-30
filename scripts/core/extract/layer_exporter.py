@@ -33,12 +33,17 @@ from core.render.effects.effects_renderer import (
     render_layer_with_effects_on_image,
     is_effect_active,
 )
+from psd_tools.constants import BlendMode as _BlendMode  # type: ignore[import-untyped]
 from .image_ops import (
     _constrain_bbox_to_canvas,
     _apply_layer_mask,
     _alpha_composite_numpy,
 )
 from .handlers import HandlerContext, run_handlers
+
+# 注册 psd-tools 缺失的调整层补丁（如 BlackAndWhite）
+# 必须在任何 composite() 调用之前导入
+import core.render.adjustments_patch  # noqa: F401
 
 
 # ── 光效层穿透渲染 ─────────────────────────────────────────────────
@@ -71,43 +76,48 @@ class LightEffectLayerInfo:
 
 
 # Photoshop 混合模式 → CSS mix-blend-mode
-# psd-tools 的 BlendMode 枚举 str() 返回 "BlendMode.XXX" 格式
-BLEND_MODES: dict[str, str] = {
-    'BlendMode.NORMAL': 'normal',
-    'BlendMode.PASS_THROUGH': 'normal',
-    'BlendMode.DISSOLVE': 'normal',
-    'BlendMode.MULTIPLY': 'multiply',
-    'BlendMode.SCREEN': 'screen',
-    'BlendMode.OVERLAY': 'overlay',
-    'BlendMode.SOFT_LIGHT': 'soft-light',
-    'BlendMode.HARD_LIGHT': 'hard-light',
-    'BlendMode.COLOR_DODGE': 'color-dodge',
-    'BlendMode.COLOR_BURN': 'color-burn',
+# 使用 psd_tools.constants.BlendMode 枚举做 key，不依赖 __str__ 实现细节。
+# 旧的字符串 key 版本（_BLEND_MODES_STR）保留供 _blend_light_layer 等内部函数使用，
+# 因为它们接收已 str() 化的 blend_mode 参数。
+BLEND_MODES: dict[_BlendMode, str] = {
+    _BlendMode.NORMAL: 'normal',
+    _BlendMode.PASS_THROUGH: 'normal',
+    _BlendMode.DISSOLVE: 'normal',
+    _BlendMode.MULTIPLY: 'multiply',
+    _BlendMode.SCREEN: 'screen',
+    _BlendMode.OVERLAY: 'overlay',
+    _BlendMode.SOFT_LIGHT: 'soft-light',
+    _BlendMode.HARD_LIGHT: 'hard-light',
+    _BlendMode.COLOR_DODGE: 'color-dodge',
+    _BlendMode.COLOR_BURN: 'color-burn',
     # PS 的 LINEAR_BURN 数学是 result = bg + fg - 1（clamp 到 [0,1]），
     # CSS 没有等价模式；视觉最接近的是 multiply（result = bg*fg），
     # 两者都是"乘法压暗"，能正确产生深色压底剪影效果。
     # 不要映射到 color-burn —— color-burn 在浅色底上会被烧成接近底色，剪影会消失。
-    'BlendMode.LINEAR_BURN': 'multiply',
-    'BlendMode.DARKEN': 'darken',
-    'BlendMode.DARKER_COLOR': 'darken',
-    'BlendMode.LIGHTEN': 'lighten',
-    'BlendMode.LIGHTER_COLOR': 'lighten',
+    _BlendMode.LINEAR_BURN: 'multiply',
+    _BlendMode.DARKEN: 'darken',
+    _BlendMode.DARKER_COLOR: 'darken',
+    _BlendMode.LIGHTEN: 'lighten',
+    _BlendMode.LIGHTER_COLOR: 'lighten',
     # PS 的 LINEAR_DODGE (Add) 数学是 result = bg + fg（clamp）≈ CSS plus-lighter；
     # 退而求其次用 screen（result = 1-(1-bg)*(1-fg)）—— 浏览器普适、视觉接近变亮。
-    'BlendMode.LINEAR_DODGE': 'screen',
-    'BlendMode.DIFFERENCE': 'difference',
-    'BlendMode.EXCLUSION': 'exclusion',
-    'BlendMode.VIVID_LIGHT': 'hard-light',
-    'BlendMode.LINEAR_LIGHT': 'hard-light',
-    'BlendMode.PIN_LIGHT': 'hard-light',
-    'BlendMode.HARD_MIX': 'hard-light',
-    'BlendMode.SUBTRACT': 'difference',
-    'BlendMode.DIVIDE': 'normal',
-    'BlendMode.HUE': 'hue',
-    'BlendMode.SATURATION': 'saturation',
-    'BlendMode.COLOR': 'color',
-    'BlendMode.LUMINOSITY': 'luminosity',
+    _BlendMode.LINEAR_DODGE: 'screen',
+    _BlendMode.DIFFERENCE: 'difference',
+    _BlendMode.EXCLUSION: 'exclusion',
+    _BlendMode.VIVID_LIGHT: 'hard-light',
+    _BlendMode.LINEAR_LIGHT: 'hard-light',
+    _BlendMode.PIN_LIGHT: 'hard-light',
+    _BlendMode.HARD_MIX: 'hard-light',
+    _BlendMode.SUBTRACT: 'difference',
+    _BlendMode.DIVIDE: 'normal',
+    _BlendMode.HUE: 'hue',
+    _BlendMode.SATURATION: 'saturation',
+    _BlendMode.COLOR: 'color',
+    _BlendMode.LUMINOSITY: 'luminosity',
 }
+
+# 字符串 key 版本：供接收已 str() 化 blend_mode 的内部函数使用
+_BLEND_MODES_STR: dict[str, str] = {str(k): v for k, v in BLEND_MODES.items()}
 
 
 class LayerExporter:
@@ -820,7 +830,7 @@ class LayerExporter:
                 'width': canvas_w,
                 'height': canvas_h,
                 'opacity': base_layer.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(base_layer.blend_mode), 'normal'),
+                'blend_mode': BLEND_MODES.get(base_layer.blend_mode, 'normal'),
                 'z_index': self._z_counter,
                 'type': 'image',
             }
@@ -951,7 +961,7 @@ class LayerExporter:
                 'width': width,
                 'height': height,
                 'opacity': layer.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(layer.blend_mode), 'normal'),
+                'blend_mode': BLEND_MODES.get(layer.blend_mode, 'normal'),
                 'z_index': self._z_counter,
             }
 
@@ -1276,7 +1286,7 @@ class LayerExporter:
                 'width': width,
                 'height': height,
                 'opacity': cl.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(cl.blend_mode), 'normal'),
+                'blend_mode': BLEND_MODES.get(cl.blend_mode, 'normal'),
                 'z_index': self._z_counter,
                 'type': 'image',
                 'image_path': rel_path,
@@ -1711,7 +1721,7 @@ class LayerExporter:
                 'width': actual_w,
                 'height': actual_h,
                 'opacity': group_layer.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(group_layer.blend_mode), 'normal'),
+                'blend_mode': BLEND_MODES.get(group_layer.blend_mode, 'normal'),
                 'z_index': self._z_counter,
                 'type': 'image',
             }

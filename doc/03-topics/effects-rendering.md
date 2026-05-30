@@ -77,3 +77,74 @@ class EffectRenderer(ABC):
 ## 新增一个效果
 
 见 [`../04-extending/add-an-effect.md`](../04-extending/add-an-effect.md)。
+
+---
+
+## psd-tools composite 补丁
+
+位置：`core/render/adjustments_patch.py`
+
+psd-tools 的 `composite()` 调用路径中存在若干 bug 或缺失功能，
+项目通过 monkey-patch 方式在运行时修复。补丁模块 **import 即自动注册**。
+
+### 已修复问题
+
+| 问题 | 症状 | 补丁函数 |
+| ---- | ---- | -------- |
+| Black & White 调整层不支持 | composite 忽略该调整层，不转灰度 | `apply_blackandwhite` |
+| `draw_stroke_effect` 对全填满形状产出错误 mask | 形状层的描边颜色覆盖整个填充颜色（如淡黄变全绿） | `_patched_draw_stroke_effect` |
+
+### 描边效果 bug 详解
+
+当形状层的 vector mask 完全填满（全 1）时：
+1. `scharr` 边缘检测返回全 0
+2. `divide(0, 0)` → NaN → 被替换为 1.0
+3. 描边 mask 变成 100% 覆盖 → 描边颜色替代填充颜色
+
+修复：检测到 edges 全 0 时直接返回空 mask，跳过归一化。
+
+详见 [`../05-conventions/known-pitfalls.md`](../05-conventions/known-pitfalls.md) #26。
+
+---
+
+## 形状层底图策略（`_render_shape_base_from_fill`）
+
+位置：`core/render/effects/effects_renderer.py`
+
+### 问题
+
+shape 图层的 `topil()` 返回 None 时，需要决定如何获取基础图：
+1. 自渲染：用 SoCo 纯色 + origination 几何（Rectangle / RoundedRectangle / Ellipse）合成
+2. composite()：让 psd-tools 从存储的 Bézier 路径合成
+
+### 决策规则
+
+| 条件 | 采用策略 | 原因 |
+| ---- | -------- | ---- |
+| 有启用的 Stroke 效果（lfx2 FrFX） | 自渲染 | composite 有描边覆盖填充色 bug（见上节） |
+| 无 Stroke 效果 | `layer.composite()` | vector path 比 origination 参数更准确 |
+
+### 为什么不能无条件自渲染
+
+PSD 图层中存在两套几何描述：
+- **Origination（Live Shape 参数）**：`VECTOR_ORIGINATION_DATA` 的 `keyOriginRRectRadii` 等，是 PS UI 上编辑时的参数
+- **Vector path（Bézier knots）**：实际存储的矢量路径，是 PS 渲染时使用的源数据
+
+两者可能不一致——用户拖拽控制点修改过路径后，origination 参数可能**未同步更新**。
+`composite()` 使用 vector path，因此在无描边 bug 时总是更准确。
+
+典型案例：领奖.psd "圆角矩形 1"（38×38px）
+- Origination radii: TL=10, TR=19, BL=19, BR=19
+- 实际 vector path: 6 knots 近似形状
+- 旧代码取平均半径 17 → 在 38px 尺寸上接近圆形（错误）
+- composite() 正确渲染为圆角矩形（正确）
+
+### 自渲染的四角独立半径支持
+
+当确实需要自渲染时（有 stroke effect），圆角矩形支持四角不同半径：
+
+1. 读取 `keyOriginRRectRadii` 中 topLeft / topRight / bottomLeft / bottomRight
+2. 按 CSS border-radius 规范缩放：`if (tl+tr) > w or (bl+br) > w or (tl+bl) > h or (tr+br) > h` → 按最大超额比例等比缩小
+3. `_draw_rounded_rect_variable()`：polygon + 16 段/角弧线近似
+
+详见 [`../05-conventions/known-pitfalls.md`](../05-conventions/known-pitfalls.md) #27。

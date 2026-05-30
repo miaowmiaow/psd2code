@@ -271,6 +271,7 @@ class LayoutOptimizeStage(Stage):
             #   过于粗暴。需启用须显式 --enable-image-layer-flatten。
             smart_merge = bool(ctx.get("smart_merge", True))
             image_layer_flatten_enabled = bool(ctx.get("image_layer_flatten_enabled", False))
+            strict = bool(ctx.get("strict", False))
             # style_optimized.css 是最终交付物，默认不写任何注释（章节标题 /
             # 版块切分 / 合并组数量注释全部关闭）。映射信息通过 layer_map.json /
             # class_alias_map.json / _mapping_report.md 三个 sidecar 文件提供。
@@ -288,117 +289,146 @@ class LayoutOptimizeStage(Stage):
                 pretty_config=pretty_cfg,
                 images_dir=(html_path.parent / "images") if smart_merge else None,
                 flatten_config=FlattenConfig(enabled=image_layer_flatten_enabled),
+                strict=strict,
             )
 
-            html_opt_path = html_path.with_name(html_path.stem + "_optimized.html")
-            css_opt_path = css_path.with_name(css_path.stem + "_optimized.css")
-            html_opt = html_opt.replace('href="style.css"', 'href="style_optimized.css"')
-
-            # 剥离 dev metadata（data-name / data-type / id="layer-*"）→ layer_map.json
-            from targets.html.postprocess.strip_dev_metadata import (  # type: ignore
-                strip_and_collect,
-                write_layer_map,
+            self._emit_optimized_files(
+                ctx, html_opt, css_opt, stats,
+                html_path, css_path, css_header, smart_merge, dict_to_css,
             )
-            html_opt, layer_map = strip_and_collect(html_opt)
-            map_path = html_opt_path.parent / "layer_map.json"
-            write_layer_map(layer_map, map_path)
-
-            # class_alias_map.json：原 ``__<layer_id>`` 类名 → 新精简类名
-            # （SemanticClassRename 产出）。开发者在优化版里看到 ``.nickname-3``
-            # 想回查 PSD 图层时的"类名→类名"反查入口；同时也是"优化版 class 与
-            # 原始 style.css class" 的桥梁。
-            import json as _json
-            alias_map = stats.get("_class_alias_map") or {}
-            if alias_map:
-                alias_path = html_opt_path.parent / "class_alias_map.json"
-                # 按新类名自然序排序，便于阅读
-                sorted_alias = dict(
-                    sorted(alias_map.items(), key=lambda kv: (kv[1], kv[0]))
-                )
-                alias_payload = {
-                    "version": 1,
-                    "description": (
-                        "优化版类名别名表：key 是原始 ``<base>__<layer_id>`` "
-                        "（与 style.css 一致），value 是 style_optimized.css 中的"
-                        "新精简类名。通过 layer_map.json.by_class[value] 可进一步"
-                        "反查 PSD 图层元数据。"
-                    ),
-                    "aliases": sorted_alias,
-                }
-                alias_path.write_text(
-                    _json.dumps(alias_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-
-            html_opt_path.write_text(html_opt, encoding="utf-8")
-            # CssPretty 优先：开发者友好的排版（DOM 序 + 属性分段 + 合并组多行）。
-            # 失败时降级到 dict_to_css（机械字典渲染）。
-            pretty_css = stats.get("_pretty_css") or ""
-            if pretty_css:
-                css_text = pretty_css
-            else:
-                merge_groups = stats.get("_css_merge_groups") or None
-                css_text = dict_to_css(
-                    css_opt, header=css_header, merge_groups=merge_groups
-                )
-
-            # 多层 url() 背景合成（CSS 文本最终态后处理）
-            # smart_merge=False 时跳过，保持多 url 背景原样
-            if smart_merge:
-                try:
-                    from targets.html.postprocess.background_flatten import (  # type: ignore
-                        flatten_multi_url_backgrounds,
-                    )
-                    images_dir = html_opt_path.parent / "images"
-                    css_text, bg_stats = flatten_multi_url_backgrounds(
-                        css_text, images_dir
-                    )
-                    stats["bg_flatten"] = bg_stats
-                    if bg_stats.get("rules_flattened"):
-                        print(
-                            f"   - 背景合成: {bg_stats['rules_flattened']} 规则 "
-                            f"(折叠 {bg_stats['layers_collapsed']} 层, "
-                            f"节省 {bg_stats['bytes_saved'] / 1024:.1f} KB)"
-                        )
-                except Exception as e:  # noqa: BLE001
-                    print(f"⚠️  背景合成失败（保留多层 CSS）: {e}")
-                    import traceback
-                    traceback.print_exc()
-
-            css_opt_path.write_text(css_text, encoding="utf-8")
-
-            print(f"✅ 布局优化完成！")
-            print(f"   原始版本: {html_path}")
-            print(f"   优化版本: {html_opt_path}")
-            print(f"   元数据映射: {map_path}")
-            if alias_map:
-                print(f"   类名别名表: {alias_path} ({len(alias_map)} 条)")
-            print(
-                f"   统计: DOM 重构 {stats['dom_restructured']} 个, "
-                f"flex 应用 {stats['flex_applied']} 个"
-            )
-
-            # 三向映射 + 图片索引（class ↔ image ↔ PSD layer），失败不阻断流程
-            try:
-                from targets.html.postprocess.mapping_report import (  # type: ignore
-                    write_mapping_reports,
-                )
-                mapping_path, image_index_path = write_mapping_reports(html_opt_path.parent)
-                if mapping_path:
-                    print(f"   映射报告: {mapping_path}")
-                if image_index_path:
-                    print(f"   图片索引: {image_index_path}")
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️  mapping report 生成失败: {e}")
-
-            ctx.set("html_path", str(html_opt_path))
-            ctx.set("layout_stats", stats)
         except Exception as e:  # noqa: BLE001
             print(f"⚠️  布局优化失败（保留原始版本）: {e}")
             import traceback
             traceback.print_exc()
 
         return ctx
+
+    # ------------------------------------------------------------------
+    # Helper: 将优化产物 + sidecar 元数据写入磁盘
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _emit_optimized_files(
+        ctx: PipelineContext,
+        html_opt: str,
+        css_opt,  # noqa: ANN001 — Dict[str, Dict[str, str]]
+        stats: dict,
+        html_path: Path,
+        css_path: Path,
+        css_header: str,
+        smart_merge: bool,
+        dict_to_css,  # noqa: ANN001 — callable
+    ) -> None:
+        """将优化后的 HTML/CSS 及 sidecar 文件写入磁盘。
+
+        从 ``run()`` 拆出的纯 IO 助手，方便独立测试 + 降低 ``run()`` 行数。
+        """
+        import json as _json
+
+        html_opt_path = html_path.with_name(html_path.stem + "_optimized.html")
+        css_opt_path = css_path.with_name(css_path.stem + "_optimized.css")
+        html_opt = html_opt.replace('href="style.css"', 'href="style_optimized.css"')
+
+        # 剥离 dev metadata（data-name / data-type / id="layer-*"）→ layer_map.json
+        from targets.html.postprocess.strip_dev_metadata import (  # type: ignore
+            strip_and_collect,
+            write_layer_map,
+        )
+        html_opt, layer_map = strip_and_collect(html_opt)
+        map_path = html_opt_path.parent / "layer_map.json"
+        write_layer_map(layer_map, map_path)
+
+        # class_alias_map.json：原 ``__<layer_id>`` 类名 → 新精简类名
+        # （SemanticClassRename 产出）。开发者在优化版里看到 ``.nickname-3``
+        # 想回查 PSD 图层时的"类名→类名"反查入口；同时也是"优化版 class 与
+        # 原始 style.css class" 的桥梁。
+        alias_map = stats.get("_class_alias_map") or {}
+        alias_path: Path | None = None
+        if alias_map:
+            alias_path = html_opt_path.parent / "class_alias_map.json"
+            # 按新类名自然序排序，便于阅读
+            sorted_alias = dict(
+                sorted(alias_map.items(), key=lambda kv: (kv[1], kv[0]))
+            )
+            alias_payload = {
+                "version": 1,
+                "description": (
+                    "优化版类名别名表：key 是原始 ``<base>__<layer_id>`` "
+                    "（与 style.css 一致），value 是 style_optimized.css 中的"
+                    "新精简类名。通过 layer_map.json.by_class[value] 可进一步"
+                    "反查 PSD 图层元数据。"
+                ),
+                "aliases": sorted_alias,
+            }
+            alias_path.write_text(
+                _json.dumps(alias_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        html_opt_path.write_text(html_opt, encoding="utf-8")
+
+        # CssPretty 优先：开发者友好的排版（DOM 序 + 属性分段 + 合并组多行）。
+        # 失败时降级到 dict_to_css（机械字典渲染）。
+        pretty_css = stats.get("_pretty_css") or ""
+        if pretty_css:
+            css_text = pretty_css
+        else:
+            merge_groups = stats.get("_css_merge_groups") or None
+            css_text = dict_to_css(
+                css_opt, header=css_header, merge_groups=merge_groups
+            )
+
+        # 多层 url() 背景合成（CSS 文本最终态后处理）
+        # smart_merge=False 时跳过，保持多 url 背景原样
+        if smart_merge:
+            try:
+                from targets.html.postprocess.background_flatten import (  # type: ignore
+                    flatten_multi_url_backgrounds,
+                )
+                images_dir = html_opt_path.parent / "images"
+                css_text, bg_stats = flatten_multi_url_backgrounds(
+                    css_text, images_dir
+                )
+                stats["bg_flatten"] = bg_stats
+                if bg_stats.get("rules_flattened"):
+                    print(
+                        f"   - 背景合成: {bg_stats['rules_flattened']} 规则 "
+                        f"(折叠 {bg_stats['layers_collapsed']} 层, "
+                        f"节省 {bg_stats['bytes_saved'] / 1024:.1f} KB)"
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️  背景合成失败（保留多层 CSS）: {e}")
+                import traceback
+                traceback.print_exc()
+
+        css_opt_path.write_text(css_text, encoding="utf-8")
+
+        print(f"✅ 布局优化完成！")
+        print(f"   原始版本: {html_path}")
+        print(f"   优化版本: {html_opt_path}")
+        print(f"   元数据映射: {map_path}")
+        if alias_map:
+            print(f"   类名别名表: {alias_path} ({len(alias_map)} 条)")
+        print(
+            f"   统计: DOM 重构 {stats['dom_restructured']} 个, "
+            f"flex 应用 {stats['flex_applied']} 个"
+        )
+
+        # 三向映射 + 图片索引（class ↔ image ↔ PSD layer），失败不阻断流程
+        try:
+            from targets.html.postprocess.mapping_report import (  # type: ignore
+                write_mapping_reports,
+            )
+            mapping_path, image_index_path = write_mapping_reports(html_opt_path.parent)
+            if mapping_path:
+                print(f"   映射报告: {mapping_path}")
+            if image_index_path:
+                print(f"   图片索引: {image_index_path}")
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  mapping report 生成失败: {e}")
+
+        ctx.set("html_path", str(html_opt_path))
+        ctx.set("layout_stats", stats)
 
 
 # ---------------------------------------------------------------------------

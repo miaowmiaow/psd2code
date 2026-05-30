@@ -49,7 +49,7 @@ optimize_layout(
 >
 > 两个开关**完全解耦**：`--no-smart-merge` 只影响多 url 背景合成（不删 DOM 子节点），`--enable-image-layer-flatten` 只控制 Step 1.2 的 ImageLayerFlatten（会删 DOM 子节点）。
 >
-> **解析阶段 (`LayerExporter`) 是纯解析版**——1 PSD 图层 = 1 layer_info / 1 PNG，本身就不做任何"装饰性合图"，所以两个开关都对解析阶段没有影响。旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False, image_layer_flatten_enabled=True)` 行为与 CLI 等价。
+> **解析阶段 (`LayerExporter`) 是纯解析版**——1 PSD 图层 = 1 layer_info / 1 PNG，本身就不做任何"装饰性合图"，所以两个开关都对解析阶段没有影响。
 
 `stats` 关键字段：
 
@@ -202,7 +202,7 @@ LayoutOptimizer.optimize():
 >
 > 判定逻辑虽然检查了 `data-type=image / 单 PNG / 邻接连通` 等几何条件，**但无法识别"栅格化产物背后的语义角色"**。在加入"按子 PSD kind 混合检测 / 语义类名族系 / 子数量上限"等更严格护栏之前，默认关闭比较安全。
 >
-> 启用方法：CLI `--enable-image-layer-flatten` / `PSDToHTMLConverter(..., image_layer_flatten_enabled=True)` / 显式 `FlattenConfig(enabled=True)`。下面的章节描述的是**启用后**的行为。
+> 启用方法：CLI `--enable-image-layer-flatten` / 显式 `FlattenConfig(enabled=True)`。下面的章节描述的是**启用后**的行为。
 
 位置：`transformers/image_layer_flatten.py`
 
@@ -611,7 +611,7 @@ SemanticClassRename 收尾：把剩余 `.<base>__<id>` 一律改写为 `.<base>`
 
 ### 产出：class_alias_map.json
 
-`LayoutOptimizeStage` / `core/converter.py::_apply_layout_optimization` 在写盘时读 `stats['_class_alias_map']`，把旧 hash 类 → 新精简类的映射写到 `class_alias_map.json`，供外部工具（React/Vue 迁移、JS 查询选择器、埋点打点）反查原图层 id。
+`LayoutOptimizeStage` 在写盘时读 `stats['_class_alias_map']`，把旧 hash 类 → 新精简类的映射写到 `class_alias_map.json`，供外部工具（React/Vue 迁移、JS 查询选择器、埋点打点）反查原图层 id。
 
 ### 排查提示
 
@@ -693,7 +693,7 @@ CssPrettyConfig(style="expanded", short_rule_max_props=4)  # 全展开但短规�
 ### 接入点
 
 - `LayoutOptimizer.optimize()` step 4 在 CssDedup 之后调用 `CssPretty.render()`，结果放 `stats['_pretty_css']`
-- `targets/html/pipeline.py::LayoutOptimizeStage.run()` 与 `core/converter.py::_apply_layout_optimization()` 写盘前**优先取该字符串**，为空才降级到 `dict_to_css(...)`
+- `targets/html/pipeline.py::LayoutOptimizeStage.run()` 写盘前**优先取该字符串**，为空才降级到 `dict_to_css(...)`
 - LayoutOptimizer 构造增加 `global_header` 和 `pretty_config` 参数
 - CLI：
   - `--css-style compact|expanded`（默认 compact）

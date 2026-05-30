@@ -61,6 +61,14 @@ def _kind_from_legacy(d: dict[str, Any]) -> str:
     return NodeKind.IMAGE.value  # default: image
 
 
+# Module-level mutable state for auto-incrementing node IDs.
+# Uses a dict (instead of a bare int) so nested/inner functions can mutate it
+# without ``nonlocal``.
+#
+# Thread-safety note: this counter is NOT safe for concurrent use.  The project
+# runs a single-threaded pipeline (ParseToIrStage → HtmlCodegenStage …), so
+# this is fine.  If concurrency is ever needed, replace with threading.local()
+# or pass an explicit counter through function args.
 _LEGACY_ID_COUNTER: dict[str, int] = {"n": 0}
 
 

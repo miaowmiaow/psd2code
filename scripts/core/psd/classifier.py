@@ -8,6 +8,8 @@
 from typing import Any, Optional
 import numpy as np
 
+from psd_tools.constants import BlendMode  # type: ignore[import-untyped]
+
 
 class LayerClassifier:
     """图层分类器 - 判断图层属性和类型"""
@@ -254,38 +256,39 @@ class LayerClassifier:
             return None
         
         # Photoshop 混合模式 → CSS mix-blend-mode
-        BLEND_MODES = {
-            'BlendMode.NORMAL': 'normal',
-            'BlendMode.PASS_THROUGH': 'normal',
-            'BlendMode.DISSOLVE': 'normal',
-            'BlendMode.MULTIPLY': 'multiply',
-            'BlendMode.SCREEN': 'screen',
-            'BlendMode.OVERLAY': 'overlay',
-            'BlendMode.SOFT_LIGHT': 'soft-light',
-            'BlendMode.HARD_LIGHT': 'hard-light',
-            'BlendMode.COLOR_DODGE': 'color-dodge',
-            'BlendMode.COLOR_BURN': 'color-burn',
-            'BlendMode.LINEAR_BURN': 'color-burn',
-            'BlendMode.DARKEN': 'darken',
-            'BlendMode.DARKER_COLOR': 'darken',
-            'BlendMode.LIGHTEN': 'lighten',
-            'BlendMode.LIGHTER_COLOR': 'lighten',
-            'BlendMode.LINEAR_DODGE': 'lighten',
-            'BlendMode.DIFFERENCE': 'difference',
-            'BlendMode.EXCLUSION': 'exclusion',
-            'BlendMode.VIVID_LIGHT': 'hard-light',
-            'BlendMode.LINEAR_LIGHT': 'hard-light',
-            'BlendMode.PIN_LIGHT': 'hard-light',
-            'BlendMode.HARD_MIX': 'hard-light',
-            'BlendMode.SUBTRACT': 'difference',
-            'BlendMode.DIVIDE': 'normal',
-            'BlendMode.HUE': 'hue',
-            'BlendMode.SATURATION': 'saturation',
-            'BlendMode.COLOR': 'color',
-            'BlendMode.LUMINOSITY': 'luminosity',
+        # 使用 psd_tools.constants.BlendMode 枚举做 key，
+        # 不依赖枚举的 __str__ 实现细节。
+        _BLEND_MODE_TO_CSS = {
+            BlendMode.NORMAL: 'normal',
+            BlendMode.PASS_THROUGH: 'normal',
+            BlendMode.DISSOLVE: 'normal',
+            BlendMode.MULTIPLY: 'multiply',
+            BlendMode.SCREEN: 'screen',
+            BlendMode.OVERLAY: 'overlay',
+            BlendMode.SOFT_LIGHT: 'soft-light',
+            BlendMode.HARD_LIGHT: 'hard-light',
+            BlendMode.COLOR_DODGE: 'color-dodge',
+            BlendMode.COLOR_BURN: 'color-burn',
+            BlendMode.LINEAR_BURN: 'color-burn',
+            BlendMode.DARKEN: 'darken',
+            BlendMode.DARKER_COLOR: 'darken',
+            BlendMode.LIGHTEN: 'lighten',
+            BlendMode.LIGHTER_COLOR: 'lighten',
+            BlendMode.LINEAR_DODGE: 'lighten',
+            BlendMode.DIFFERENCE: 'difference',
+            BlendMode.EXCLUSION: 'exclusion',
+            BlendMode.VIVID_LIGHT: 'hard-light',
+            BlendMode.LINEAR_LIGHT: 'hard-light',
+            BlendMode.PIN_LIGHT: 'hard-light',
+            BlendMode.HARD_MIX: 'hard-light',
+            BlendMode.SUBTRACT: 'difference',
+            BlendMode.DIVIDE: 'normal',
+            BlendMode.HUE: 'hue',
+            BlendMode.SATURATION: 'saturation',
+            BlendMode.COLOR: 'color',
+            BlendMode.LUMINOSITY: 'luminosity',
         }
         
-        blend_mode_str = str(layer.blend_mode)
-        css_mode = BLEND_MODES.get(blend_mode_str, 'normal')
+        css_mode = _BLEND_MODE_TO_CSS.get(layer.blend_mode, 'normal')
         
         return css_mode if css_mode != 'normal' else None

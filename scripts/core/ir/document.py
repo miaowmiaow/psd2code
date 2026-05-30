@@ -40,11 +40,19 @@ class Document(BaseModel):
 
     # ---- convenience ----
     def iter_nodes(self):
-        """Pre-order traversal over all nodes (root first)."""
+        """Pre-order traversal over all nodes (root first).
+
+        Uses an explicit stack (LIFO via list.pop()) to avoid recursion.
+        ``reversed(n.children)`` ensures that after push, the first child sits
+        at the top of the stack and is visited next — preserving left-to-right
+        (original PSD stacking) order.  Non-GroupNode leaves have no children,
+        so they simply yield without pushing anything.
+        """
         yield self.root
         stack: list[Node] = list(self.root.children)
         while stack:
             n = stack.pop()
             yield n
             if isinstance(n, GroupNode):
+                # reversed so that children[0] ends up on top (visited first)
                 stack.extend(reversed(n.children))

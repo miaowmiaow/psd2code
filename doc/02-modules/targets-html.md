@@ -323,7 +323,7 @@ DOMRestructure → ImageLayerFlatten → SiblingGroupDetector → FlexApplier �
 ```
 
 `LayoutOptimizer.optimize()` 把渲染好的字符串放在 `stats['_pretty_css']`；
-`LayoutOptimizeStage` / `core/converter.py` 写盘前**优先取该字符串**，为空才降级到
+`LayoutOptimizeStage` 写盘前**优先取该字符串**，为空才降级到
 `dict_to_css(...)`。所以 CssPretty 抛任何异常都不会阻断生成。
 
 **与下游的关系**：CssPretty 只改"文本排版"，**不改** `css_rules` 字典本身。
@@ -355,7 +355,7 @@ react / vue target 仍然按 selector 查样式，零影响。
 
 ## Postprocess：class_alias_map.json 落盘
 
-`LayoutOptimizeStage` / `core/converter.py::_apply_layout_optimization` 在写盘 `index_optimized.html` 之前，读 `stats['_class_alias_map']`（由 `SemanticClassRename` / `VirtualWrapperRename` 填充），把**旧 → 新** 类名映射写到 `class_alias_map.json`：
+`LayoutOptimizeStage` 在写盘 `index_optimized.html` 之前，读 `stats['_class_alias_map']`（由 `SemanticClassRename` / `VirtualWrapperRename` 填充），把**旧 → 新** 类名映射写到 `class_alias_map.json`：
 
 ```json
 {
@@ -372,8 +372,7 @@ react / vue target 仍然按 selector 查样式，零影响。
 - AI 排查"旧类名为什么不见了"时的反向索引锚点
 
 接入点：
-- `targets/html/pipeline.py::LayoutOptimizeStage.run()` —— 主路径
-- `core/converter.py::_apply_layout_optimization()` —— 兼容路径
+- `targets/html/pipeline.py::LayoutOptimizeStage.run()`
 
 写盘时机：在 `strip_and_collect` 写 `layer_map.json` 的同一段逻辑里；如果 `_class_alias_map` 为空字典则不写。
 
@@ -401,10 +400,9 @@ def write_layer_map(layer_map: dict, path: Path) -> None: ...
 | `layer_map.json`         | 同时存 `by_class`（首类名 → meta）和 `by_layer_id`（layer-N → meta），双向反查 |
 
 **接入点**：
-- `targets/html/pipeline.py::LayoutOptimizeStage.run()` —— 主路径
-- `core/converter.py::_apply_layout_optimization()` —— 兼容路径
+- `targets/html/pipeline.py::LayoutOptimizeStage.run()`
 
-两处都在 `html_opt.replace('href="style.css"', ...)` 之后、`html_opt_path.write_text` 之前
+在 `html_opt.replace('href="style.css"', ...)` 之后、`html_opt_path.write_text` 之前
 调用 `strip_and_collect` + `write_layer_map`，确保产物三件套（HTML / CSS / JSON）原子产出。
 
 **反查**：grep 优化版 HTML 拿到类名（如 `shape-2__5`）→ 查 `layer_map.json["by_class"]["shape-2__5"]`

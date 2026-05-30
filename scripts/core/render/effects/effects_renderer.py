@@ -360,6 +360,53 @@ def _alpha_composite(dst: np.ndarray, src: np.ndarray) -> np.ndarray:
     return result
 
 
+def _draw_rounded_rect_variable(
+    draw: "ImageDraw.ImageDraw",
+    w: int,
+    h: int,
+    tl: float,
+    tr: float,
+    bl: float,
+    br: float,
+) -> None:
+    """绘制四角不同半径的圆角矩形到 draw 上（fill=255）。
+
+    策略：用 polygon 构建圆角矩形路径。
+    每个角用若干直线段近似圆弧（足够平滑即可，38px 的图形 8 段就够）。
+    """
+    import math
+
+    segments_per_corner = 16  # 每个角的弧线段数
+
+    def _arc_points(cx: float, cy: float, r: float, start_angle: float, end_angle: float):
+        """生成圆弧上的点列表（角度单位：弧度）。"""
+        if r < 0.5:
+            return [(cx, cy)]
+        points = []
+        for i in range(segments_per_corner + 1):
+            t = start_angle + (end_angle - start_angle) * i / segments_per_corner
+            points.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+        return points
+
+    pi = math.pi
+    points: list[tuple[float, float]] = []
+
+    # 顶边（从左上角弧末端到右上角弧起点）
+    # 左上角：圆心在 (tl, tl)，弧从 180° 到 270°（即 pi 到 1.5*pi）
+    points.extend(_arc_points(tl, tl, tl, pi, 1.5 * pi))
+
+    # 右上角：圆心在 (w-1-tr, tr)，弧从 270° 到 360°（即 1.5*pi 到 2*pi）
+    points.extend(_arc_points(w - 1 - tr, tr, tr, 1.5 * pi, 2 * pi))
+
+    # 右下角：圆心在 (w-1-br, h-1-br)，弧从 0° 到 90°（即 0 到 0.5*pi）
+    points.extend(_arc_points(w - 1 - br, h - 1 - br, br, 0, 0.5 * pi))
+
+    # 左下角：圆心在 (bl, h-1-bl)，弧从 90° 到 180°（即 0.5*pi 到 pi）
+    points.extend(_arc_points(bl, h - 1 - bl, bl, 0.5 * pi, pi))
+
+    draw.polygon(points, fill=255)
+
+
 def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
     """
     用"SoCo 纯色填充 + origination 几何"自己合成 shape 图层的基础图。
@@ -387,6 +434,19 @@ def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
     try:
         # 必须是 shape 类型
         if not hasattr(layer, 'kind') or layer.kind != 'shape':
+            return None
+
+        # 只有当图层带有描边效果（lfx2 FrFX）时才需要自渲染
+        # psd-tools 的 composite() 对无描边的 shape 图层能正确渲染 vector path
+        # 仅在有描边时才有 bug（描边颜色覆盖填充色），此时才需要绕开
+        has_stroke_effect = False
+        effects = getattr(layer, 'effects', None)
+        if effects:
+            for eff in effects:
+                if type(eff).__name__ == 'Stroke' and getattr(eff, 'enabled', False):
+                    has_stroke_effect = True
+                    break
+        if not has_stroke_effect:
             return None
 
         # 必须有 SoCo 填充色
@@ -433,7 +493,7 @@ def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
             # 直角矩形：整片填充
             draw.rectangle((0, 0, w, h), fill=255)
         elif orig_type == 'RoundedRectangle':
-            # 圆角矩形：用 PIL 的 rounded_rectangle
+            # 圆角矩形：支持四角不同半径
             radii = getattr(orig, 'radii', None) or {}
             try:
                 tl = float(radii.get(b'topLeft', 0)) if radii else 0
@@ -442,16 +502,35 @@ def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
                 br = float(radii.get(b'bottomRight', 0)) if radii else 0
             except Exception:
                 tl = tr = bl = br = 0
-            # PIL 不支持四角不同半径，取均值（绝大多数 PSD 圆角矩形四角相同）
-            radius = int(round((tl + tr + bl + br) / 4))
-            radius = max(0, min(radius, min(w, h) // 2))
-            if radius > 0:
-                if hasattr(draw, 'rounded_rectangle'):
+
+            # 按 CSS border-radius 规范缩放：如果相邻角半径之和超过边长则按比例缩
+            max_ratio = max(
+                (tl + tr) / w if w > 0 else 0,
+                (bl + br) / w if w > 0 else 0,
+                (tl + bl) / h if h > 0 else 0,
+                (tr + br) / h if h > 0 else 0,
+            )
+            if max_ratio > 1.0:
+                scale = 1.0 / max_ratio
+                tl, tr, bl, br = tl * scale, tr * scale, bl * scale, br * scale
+
+            tl = max(0, min(tl, min(w, h) / 2))
+            tr = max(0, min(tr, min(w, h) / 2))
+            bl = max(0, min(bl, min(w, h) / 2))
+            br = max(0, min(br, min(w, h) / 2))
+
+            if tl == tr == bl == br:
+                # 四角相同，直接用 PIL rounded_rectangle
+                radius = int(round(tl))
+                if radius > 0 and hasattr(draw, 'rounded_rectangle'):
                     draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
                 else:
-                    draw.rectangle((0, 0, w, h), fill=255)
+                    draw.rectangle((0, 0, w - 1, h - 1), fill=255)
+            elif max(tl, tr, bl, br) > 0:
+                # 四角不同半径：用 pieslice + rectangle 组合绘制
+                _draw_rounded_rect_variable(draw, w, h, tl, tr, bl, br)
             else:
-                draw.rectangle((0, 0, w, h), fill=255)
+                draw.rectangle((0, 0, w - 1, h - 1), fill=255)
         elif orig_type == 'Ellipse':
             draw.ellipse((0, 0, w - 1, h - 1), fill=255)
         else:

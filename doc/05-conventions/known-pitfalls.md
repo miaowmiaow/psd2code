@@ -546,3 +546,97 @@ diff 体验崩坏。
 **绝不要：** 在 LayoutOptimizer 任何位置再加同名 pass，那会让 overflow 决策来源
 变多导致回归不稳。如发现现有 group_renderer 漏补某种容器，**应当在 group_renderer
 里增强**，而不是在 postprocess 兜底。
+
+---
+
+## 26. psd-tools `draw_stroke_effect` 对全填满形状产出错误 mask
+
+**位置：** `core/render/adjustments_patch.py` 的 `_patched_draw_stroke_effect`
+
+**背景：** psd-tools 原生的 `draw_stroke_effect`（`psd_tools/composite/effects.py`）
+在对**全填满的形状层**（shape 数组全为 1.0）生成描边 mask 时存在 bug。
+
+**根因链条：**
+1. 矩形/形状图层的 vector mask 全为 1（完全填充）
+2. `filters.scharr(shape[:,:,0])` 边缘检测返回全 0（无变化）
+3. `utils.divide(0 - 0, 0 - 0)` → 产生 NaN
+4. psd-tools 将 NaN 替换为 1.0 → mask 100% 覆盖
+5. 描边颜色（如绿色）**完全覆盖**填充颜色（如淡黄色）
+
+**典型症状：** 形状层有内描边（FrFX, InsetFrame）时，composite 输出的颜色
+是描边颜色而非填充颜色。例如：黄色矩形 + 2px 绿色内描边 → 导出全绿。
+
+**修复方案：** monkey-patch `draw_stroke_effect`，在 scharr 结果全 0 时
+直接返回空 mask（全 0），跳过后续的归一化逻辑：
+
+```python
+edges = filters.scharr(shape[:, :, 0])
+edge_max = np.max(edges)
+if edge_max < 1e-7:
+    # shape 完全均匀，没有边缘可以描边
+    mask = np.zeros((height, width, 1), dtype=np.float32)
+    return color, mask
+```
+
+**Monkey-patch 注入方式（坑）：** 直接 `eff_mod.draw_stroke_effect = patched`
+**不生效**，因为 `Compositor._apply_stroke_effect` 已经通过导入时的
+`__globals__` 绑定了原始函数引用。**必须**同时修改方法的 `__globals__` 字典：
+
+```python
+from psd_tools.composite.composite import Compositor
+Compositor._apply_stroke_effect.__globals__[
+    'draw_stroke_effect'
+] = _patched_draw_stroke_effect
+```
+
+**测试：** `tests/test_adjustments_patch.py::TestPatchedDrawStrokeEffect`
+覆盖了 shape 全 1、全 0、有边缘三种场景。
+
+---
+
+## 27. 形状层自渲染（`_render_shape_base_from_fill`）仅在有描边效果时启用
+
+**位置：** `core/render/effects/effects_renderer.py` 的 `_render_shape_base_from_fill`
+
+**背景：** 该函数用 SoCo 填充色 + origination 几何（Rectangle / RoundedRectangle /
+Ellipse）自行合成 shape 图层的基础图，**绕开** psd-tools `composite()` 的描边 bug。
+
+**错误做法（已踩过的坑）：** 对所有有 SoCo 填充的 shape 图层无条件自渲染。
+
+**后果：** 对于**没有描边效果**的圆角矩形，origination 中存储的是 "Live Shape"
+参数（`keyOriginRRectRadii`），但 psd-tools `composite()` 使用的是图层存储的
+实际 Bézier 路径——两者不一定一致。典型案例：
+
+- 领奖.psd "圆角矩形 1"（38×38px）：origination radii = TL10/TR19/BL19/BR19
+- psd-tools 存储的路径是 6 knots 的近似圆形
+- 旧代码对四角半径取平均值 `(10+19+19+19)/4 ≈ 17` → 在 38px 图形上接近圆形
+- 实际 PS 渲染用的是存储路径（近似圆角矩形），composite() 能正确还原
+
+自渲染**仅**在图层有 stroke effect 时才比 composite() 更准确（因为 composite 的
+描边 bug 会把填充色覆盖掉，见 #26）。
+
+**正确做法：** 在函数开头检测是否存在启用的 Stroke 效果，若无则立即返回 None：
+
+```python
+has_stroke_effect = False
+effects = getattr(layer, 'effects', None)
+if effects:
+    for eff in effects:
+        if type(eff).__name__ == 'Stroke' and getattr(eff, 'enabled', False):
+            has_stroke_effect = True
+            break
+if not has_stroke_effect:
+    return None  # 让 composite() 正确渲染 vector path
+```
+
+**决策矩阵：**
+
+| 场景 | 策略 | 原因 |
+| ---- | ---- | ---- |
+| shape + 有 stroke effect | 自渲染 | composite 描边 bug（#26） |
+| shape + 无 stroke effect | composite() | vector path 更准确 |
+| topil() 不为 None | 直接用 topil() | 最快、最准 |
+
+**附带改进：** 自渲染路径中，圆角矩形改为支持四角独立半径
+（`_draw_rounded_rect_variable`），不再取平均值。实现 CSS border-radius 规范的
+缩放规则：相邻角半径之和超过边长时按比例缩小。

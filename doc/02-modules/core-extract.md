@@ -188,7 +188,7 @@ CLI 入口 `psd_to_code.py` 把对应值写入 `PipelineContext`：
 
 `LayoutOptimizeStage` 读取两个 ctx key，相应地构造 `images_dir`（`None` 时禁用主路径多 url 合成）和 `FlattenConfig(enabled=...)`，并在 `smart_merge=False` 时跳过 `flatten_multi_url_backgrounds` 兜底。
 
-旧入口 `PSDToHTMLConverter(psd_path, smart_merge=False, image_layer_flatten_enabled=True)` 行为与 CLI 等价。两个参数都不会传给 `LayerExporter`——解析阶段始终是纯解析。
+两个参数都不会传给 `LayerExporter`——解析阶段始终是纯解析。
 
 ## 与 IR 的连接
 

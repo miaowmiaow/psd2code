@@ -139,7 +139,7 @@ class ClippingGroupHandler(LayerHandler):
                 'width': max(base_layer.width, 0),
                 'height': max(base_layer.height, 0),
                 'opacity': base_layer.opacity / 255.0,
-                'blend_mode': BLEND_MODES.get(str(base_layer.blend_mode), 'normal'),
+                'blend_mode': BLEND_MODES.get(base_layer.blend_mode, 'normal'),
                 'z_index': exp._z_counter,
                 'children': children,
             }
@@ -449,7 +449,7 @@ class GroupHandler(LayerHandler):
             'width': max(grp_width, 0),
             'height': max(grp_height, 0),
             'opacity': layer.opacity / 255.0,
-            'blend_mode': BLEND_MODES.get(str(layer.blend_mode), 'normal'),
+            'blend_mode': BLEND_MODES.get(layer.blend_mode, 'normal'),
             'z_index': exp._z_counter,
             'children': children,
         }
