@@ -308,6 +308,7 @@ class DOMRestructure:
                 container['data-bg-absorbed'] = '1'
                 absorbed_containers.append(container)
 
+
         if stats_absorbed > 0:
             print(f"    🌐 容器背景吸收 pass: 共吸收 {stats_absorbed} 个 image leaf 为容器 background")
 
@@ -315,6 +316,10 @@ class DOMRestructure:
         # 形态，则升级为 v-col（带 display:flex; flex-direction:column）
         if self.config.enable_stack_to_col_reclassify and absorbed_containers:
             self._reclassify_stacks_after_bg_absorption(absorbed_containers)
+
+        # 清理临时标记属性（避免残留到最终 HTML 输出）
+        for el in self.soup.find_all(attrs={'data-no-bg-absorb': True}):
+            del el['data-no-bg-absorb']
 
     def _collect_bg_absorb_target_containers(self) -> List:
         """采集所有可能作为"背景吸收目标"的容器元素
@@ -389,6 +394,9 @@ class DOMRestructure:
                 continue
             leaf = info['leaf']
             styles = info['styles']
+            # 被 tree 路径标记为"不可吸收"的 leaf 跳过
+            if leaf.element.get('data-no-bg-absorb'):
+                continue
             if not self._is_absorbable_bg_leaf(leaf, styles):
                 continue
 
@@ -1451,7 +1459,23 @@ class DOMRestructure:
         cx, cy = container_bbox.left, container_bbox.top
         cw, ch = container_bbox.width, container_bbox.height
 
+        # 过滤掉溢出容器边界的 leaf（offset 为负表示图片超出容器左/上边界，
+        # background-image 会被容器边界裁剪，无法等价还原 absolute 溢出效果）
+        filtered_candidates = []
         for leaf, styles in candidates_visual:
+            offset_x = leaf.bbox.left - cx
+            offset_y = leaf.bbox.top - cy
+            if offset_x < -0.5 or offset_y < -0.5:
+                # 标记该 leaf 不可被吸收为背景（防止后续容器背景吸收 pass
+                # 因坐标相对化而误判）
+                leaf.element['data-no-bg-absorb'] = '1'
+                continue  # 溢出容器边界，不适合吸收为 background
+            filtered_candidates.append((leaf, styles))
+
+        if not filtered_candidates:
+            return []
+
+        for leaf, styles in filtered_candidates:
             bg_images.append(styles['background-image'])
 
             offset_x = leaf.bbox.left - cx
@@ -1523,7 +1547,7 @@ class DOMRestructure:
         if self._has_blend_mode_descendant(container_elem):
             container_styles['isolation'] = 'isolate'
 
-        return [leaf for leaf, _ in candidates]
+        return [leaf for leaf, _ in filtered_candidates]
 
     # ------------------------------------------------------------------
     # 离线背景合成（主路径，下沉自原 background_flatten 后处理）
