@@ -271,6 +271,17 @@ class GroupHandler(LayerHandler):
                 for m in cluster_members:
                     partial_merged_ids.add(id(m))
 
+        # ── 检查组是否有 layer mask（需要传播到子层导出）──────────────────
+        # 当组不走 merge_full 时（子层独立导出），组自身的 mask 不会通过
+        # composite() 自动应用，需要显式传播到子层。
+        _has_group_mask = (
+            hasattr(layer, 'mask') and layer.mask is not None
+            and not getattr(layer.mask, 'disabled', False)
+            and layer.mask.bbox != (0, 0, 0, 0)
+        )
+        if _has_group_mask:
+            exp._ancestor_group_masks.append((layer, layer.mask.bbox))
+
         # ── 路径 4: 默认递归（含上面任何路径回退到这里的情况） ────────────
         # 组的画布绝对坐标
         from config import Config
@@ -421,6 +432,10 @@ class GroupHandler(LayerHandler):
             if offset_x != 0 or offset_y != 0:
                 print(f"{'  ' * depth}  🔧 调整子图层坐标偏移: ({-offset_x}, {-offset_y})")
                 exp._adjust_children_offset(children, -offset_x, -offset_y)
+
+        # ── pop 组 mask ──
+        if _has_group_mask:
+            exp._ancestor_group_masks.pop()
 
         exp._z_counter += 1
         from .layer_exporter import BLEND_MODES

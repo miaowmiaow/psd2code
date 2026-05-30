@@ -6,7 +6,7 @@
 
 - Python 3.10+（`from __future__ import annotations` 几乎所有文件都加上）
 - pydantic 2+（语义参考 `core/ir/*`）
-- psd-tools 1.14+
+- psd-tools 1.17.1+
 - Pillow 10+
 - beautifulsoup4（仅 `targets/html/postprocess` 使用）
 - numpy

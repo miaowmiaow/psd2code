@@ -14,6 +14,9 @@
 LayoutOptimizer (targets/html/postprocess/layout_optimizer) 接管。
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import Any
 from pathlib import Path
 from PIL import Image
@@ -36,6 +39,35 @@ from .image_ops import (
     _alpha_composite_numpy,
 )
 from .handlers import HandlerContext, run_handlers
+
+
+# ── 光效层穿透渲染 ─────────────────────────────────────────────────
+#
+# 详见 doc/03-topics/light-blend-penetrate.md
+
+#: "光照类" blend mode 集合——这些模式下黑色像素是恒等色（与底色混合后
+#: 相当于透明/不贡献），topil() 导出时黑色会"暴露"成假的黑色区块。
+#: 只有命中此集合 + 图层原始像素含显著黑色区域，才值得走穿透渲染。
+_LIGHT_BLEND_MODES: frozenset[str] = frozenset({
+    'COLOR_DODGE',
+    'LINEAR_DODGE',   # PS add → CSS screen（黑色=恒等）
+    'SCREEN',         # 黑色=恒等
+    'LIGHTEN',        # 黑色=恒等（取 max）
+    'LIGHTER_COLOR',  # 黑色=恒等（取亮色）
+})
+
+#: Phase 2 判定 alpha 不透明阈值（避免抗锯齿边缘误判）
+_ALPHA_OPAQUE_THRESHOLD = 10  # 0-255 量级
+
+
+@dataclass
+class LightEffectLayerInfo:
+    """一个被标记为需要穿透渲染的光效图层。"""
+
+    layer: Any                                # 光效图层对象
+    bbox: tuple[int, int, int, int]           # (left, top, right, bottom)
+    parent_pt_group: Any                      # 所在的 PASS_THROUGH 父组
+    needs_penetrate: bool = False             # Phase 2 判定结果
 
 
 # Photoshop 混合模式 → CSS mix-blend-mode
@@ -98,6 +130,415 @@ class LayerExporter:
         # 图片去重：md5 → 已保存的 image_path (如 'images/xxx.png')
         self._image_hash_map: dict[str, str] = {}
         self._dedup_count: int = 0
+
+        # 光效层穿透映射：target 图层 id → 需要叠加的光效层列表
+        # 由 _pre_scan_light_layers() 在 export_layers() 前构建
+        self._penetrate_map: dict[int, list[LightEffectLayerInfo]] = {}
+
+        # 祖先组 mask 栈：当组不走 merge_all 路径（子层独立导出）
+        # 且组自身有 layer mask 时，需要将 group mask 传播到子层导出。
+        # 每个元素是 (mask_layer, mask_bbox) 元组。
+        self._ancestor_group_masks: list[tuple[Any, tuple[int, int, int, int]]] = []
+
+        # Phase 3 临时图像缓存：避免对同一图层重复调用 composite()/topil()
+        # key = id(layer), value = RGBA PIL Image (或 None 表示获取失败)
+        # 在 _pre_scan_light_layers 结束后清空以释放内存。
+        self._phase3_img_cache: dict[int, Any] = {}
+
+        # Phase 5: 需要抑制独立导出的光效层 id 集合
+        # 当光效层 needs_penetrate=True 且已成功映射到目标层时，
+        # 其 Phase 4 像素合成已在目标层 PNG 上完成，自身不应再独立导出——
+        # 否则 CSS mix-blend-mode 无法穿透 DOM 容器（stacking context），
+        # 导致黑色恒等色像素暴露为真实黑底。
+        self._suppressed_light_layers: set[int] = set()
+
+        self._pre_scan_light_layers(psd)
+
+    # ------------------------------------------------------------------
+    # 光效层穿透渲染预扫描（Phase 1-3）
+    # ------------------------------------------------------------------
+
+    def _pre_scan_light_layers(self, psd: Any) -> None:
+        """预扫描 PSD，识别需要穿透渲染的光效层并构建 penetrate_map。
+
+        Phase 1: 遍历所有图层，找出父组是 PASS_THROUGH 模式、且 blend_mode
+                 属于 _LIGHT_BLEND_MODES 的可见光效层（候选）。
+        Phase 2: 对每个候选，检查其在 PT 组内下方是否有不透明覆盖；
+                 若无 → 标记 needs_penetrate=True。
+        Phase 3: 对 needs_penetrate 的光效层，在 PT 组的外部向下查找
+                 重叠的不透明目标图层，构建 penetrate_map。
+        """
+        candidates: list[LightEffectLayerInfo] = []
+
+        # ── Phase 1: 识别候选光效层 ──
+        def _scan_recursive(parent: Any) -> None:
+            try:
+                children = list(parent)
+            except Exception:
+                return
+            is_parent_pt = (
+                hasattr(parent, 'is_group')
+                and parent.is_group()
+                and 'PASS_THROUGH' in str(getattr(parent, 'blend_mode', '')).upper()
+            )
+            for layer in children:
+                if hasattr(layer, 'is_group') and layer.is_group():
+                    _scan_recursive(layer)
+                    continue
+                if not is_parent_pt:
+                    continue
+                if not layer.visible or layer.opacity == 0:
+                    continue
+                bm = str(getattr(layer, 'blend_mode', '')).upper()
+                # 从 "BlendMode.SCREEN" 提取 "SCREEN"
+                bm_short = bm.split('.')[-1] if '.' in bm else bm
+                if bm_short not in _LIGHT_BLEND_MODES:
+                    continue
+                bbox = layer.bbox
+                if bbox[2] - bbox[0] <= 0 or bbox[3] - bbox[1] <= 0:
+                    continue
+                candidates.append(LightEffectLayerInfo(
+                    layer=layer,
+                    bbox=tuple(bbox),
+                    parent_pt_group=parent,
+                ))
+
+        _scan_recursive(psd)
+
+        if not candidates:
+            return
+
+        # ── Phase 2: 组内检查 → 标记 needs_penetrate ──
+        for info in candidates:
+            info.needs_penetrate = self._check_needs_penetrate(info)
+
+        penetrate_candidates = [c for c in candidates if c.needs_penetrate]
+        if not penetrate_candidates:
+            return
+
+        print(f"🔦 光效层穿透扫描: {len(candidates)} 个候选, "
+              f"{len(penetrate_candidates)} 个需要穿透")
+        for c in penetrate_candidates:
+            print(f"   💡 {c.layer.name} (blend={str(c.layer.blend_mode)}, "
+                  f"bbox={c.bbox})")
+
+        # ── Phase 3: 向外匹配 → 构建 penetrate_map ──
+        for info in penetrate_candidates:
+            self._find_penetrate_targets(info)
+
+        if self._penetrate_map:
+            print(f"   📋 穿透映射: {len(self._penetrate_map)} 个目标图层"
+                  f"需叠加光效")
+
+        # ── Phase 5: 构建抑制集合 ──
+        # 已被 Phase 4 映射到目标层的光效层，不应再独立导出（避免黑底）
+        for light_list in self._penetrate_map.values():
+            for li in light_list:
+                self._suppressed_light_layers.add(id(li.layer))
+        if self._suppressed_light_layers:
+            print(f"   🚫 抑制独立导出: {len(self._suppressed_light_layers)} "
+                  f"个光效层（已合成到目标层）")
+
+        # 释放 Phase 3 临时图像缓存（可能占用大量内存）
+        self._phase3_img_cache.clear()
+
+    # 覆盖率阈值：组内 sibling 覆盖光效层有效区域达到此比例时认为不需穿透
+    _COVERAGE_THRESHOLD = 0.90
+
+    def _check_needs_penetrate(self, info: LightEffectLayerInfo) -> bool:
+        """Phase 2: 检查光效层在其 PT 组内下方是否被充分覆盖。
+
+        判定逻辑：
+        1. clipping layer → 直接不穿透（base layer 天然提供底色）
+        2. 计算有效作用区域（layer_bbox ∩ mask_bbox ∩ clip_base_bbox）
+        3. 用有效区域与组内下方 sibling 做覆盖率计算
+        4. 覆盖率 >= _COVERAGE_THRESHOLD → 不穿透；否则 → 需要穿透
+        """
+        group = info.parent_pt_group
+        light_layer = info.layer
+        light_bbox = info.bbox
+
+        # ── 快速路径：clipping layer 不需要穿透 ──
+        if getattr(light_layer, 'clipping', False):
+            return False
+
+        try:
+            siblings = list(group)
+        except Exception:
+            return True  # 保守：读不到 sibling → 需要穿透
+
+        # 找到 light_layer 在 sibling 中的 index
+        light_idx = -1
+        for i, sib in enumerate(siblings):
+            if sib is light_layer:
+                light_idx = i
+                break
+        if light_idx <= 0:
+            return True  # 在最底层，下方无图层 → 需要穿透
+
+        # ── 计算有效作用区域 ──
+        effective_bbox = list(light_bbox)
+
+        # layer mask 限制
+        mask = getattr(light_layer, 'mask', None)
+        if mask is not None:
+            mask_bbox = getattr(mask, 'bbox', None)
+            if mask_bbox and len(mask_bbox) == 4:
+                effective_bbox[0] = max(effective_bbox[0], mask_bbox[0])
+                effective_bbox[1] = max(effective_bbox[1], mask_bbox[1])
+                effective_bbox[2] = min(effective_bbox[2], mask_bbox[2])
+                effective_bbox[3] = min(effective_bbox[3], mask_bbox[3])
+
+        # vector mask 限制（如果有）
+        vector_mask = getattr(light_layer, 'vector_mask', None)
+        if vector_mask is not None:
+            vm_bbox = getattr(vector_mask, 'bbox', None)
+            if vm_bbox and len(vm_bbox) == 4:
+                effective_bbox[0] = max(effective_bbox[0], vm_bbox[0])
+                effective_bbox[1] = max(effective_bbox[1], vm_bbox[1])
+                effective_bbox[2] = min(effective_bbox[2], vm_bbox[2])
+                effective_bbox[3] = min(effective_bbox[3], vm_bbox[3])
+
+        # 有效区域退化为空 → 不产生可见像素，不需穿透
+        if effective_bbox[2] <= effective_bbox[0] or effective_bbox[3] <= effective_bbox[1]:
+            return False
+
+        effective_bbox_t = tuple(effective_bbox)
+        effective_area = (
+            (effective_bbox_t[2] - effective_bbox_t[0])
+            * (effective_bbox_t[3] - effective_bbox_t[1])
+        )
+
+        # ── 计算组内下方 sibling 对有效区域的覆盖率 ──
+        total_covered_area = 0
+        for i in range(light_idx - 1, -1, -1):
+            sib = siblings[i]
+            if not sib.visible or sib.opacity == 0:
+                continue
+            # 跳过 clipping layer（它受 base 限制，不作为独立底色）
+            if getattr(sib, 'clipping', False):
+                continue
+            sib_bbox = sib.bbox
+            inter = self._intersect_bbox(effective_bbox_t, sib_bbox)
+            if inter is None:
+                continue
+            inter_area = (inter[2] - inter[0]) * (inter[3] - inter[1])
+            total_covered_area += inter_area
+
+        coverage = total_covered_area / max(1, effective_area)
+        return coverage < self._COVERAGE_THRESHOLD
+
+    def _find_penetrate_targets(self, info: LightEffectLayerInfo) -> None:
+        """Phase 3: 在外组下方查找与光效层重叠的目标图层并记录到 penetrate_map。
+
+        递归向上穿透：如果外层父组本身也是 PASS_THROUGH，继续向上查找。
+        """
+        group = info.parent_pt_group
+        light_bbox = info.bbox
+
+        self._find_targets_in_outer_scope(info, group, light_bbox)
+
+    def _find_targets_in_outer_scope(
+        self,
+        info: LightEffectLayerInfo,
+        pt_group: Any,
+        light_bbox: tuple[int, int, int, int],
+    ) -> None:
+        """在 pt_group 的父级中查找下方目标图层。"""
+        outer_parent = getattr(pt_group, 'parent', None) or getattr(pt_group, '_parent', None)
+        if outer_parent is None:
+            # 尝试回退到 psd 根
+            outer_parent = self.psd
+        if outer_parent is None:
+            return
+
+        try:
+            outer_children = list(outer_parent)
+        except Exception:
+            return
+
+        # 找到 pt_group 在外层的 index
+        grp_idx = -1
+        for i, child in enumerate(outer_children):
+            if child is pt_group:
+                grp_idx = i
+                break
+        if grp_idx < 0:
+            return
+
+        # 在 pt_group 之下查找目标图层
+        for i in range(grp_idx - 1, -1, -1):
+            sib = outer_children[i]
+            if not sib.visible or sib.opacity == 0:
+                continue
+            # 跳过调整层（无像素内容）
+            kind = str(getattr(sib, 'kind', '') or '').lower()
+            if 'adjust' in kind:
+                continue
+
+            sib_bbox = sib.bbox
+            inter = self._intersect_bbox(light_bbox, sib_bbox)
+            if inter is None:
+                continue
+
+            # 检查交集区域内是否有不透明内容
+            if not self._has_opaque_in_region(sib, sib_bbox, inter):
+                continue
+
+            # 记录到 penetrate_map
+            target_id = id(sib)
+            if target_id not in self._penetrate_map:
+                self._penetrate_map[target_id] = []
+            # 避免重复添加同一光效层
+            if not any(li.layer is info.layer for li in self._penetrate_map[target_id]):
+                self._penetrate_map[target_id].append(info)
+
+        # 如果 outer_parent 本身也是 PASS_THROUGH 组，继续向上穿透
+        if (hasattr(outer_parent, 'is_group')
+                and outer_parent.is_group()
+                and 'PASS_THROUGH' in str(getattr(outer_parent, 'blend_mode', '')).upper()):
+            self._find_targets_in_outer_scope(info, outer_parent, light_bbox)
+
+    @staticmethod
+    def _intersect_bbox(
+        a: tuple[int, int, int, int],
+        b: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        """计算两个 bbox 的交集。返回 None 如果无交集。"""
+        left = max(a[0], b[0])
+        top = max(a[1], b[1])
+        right = min(a[2], b[2])
+        bottom = min(a[3], b[3])
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+
+    def _has_opaque_in_region(
+        self,
+        layer: Any,
+        layer_bbox: tuple[int, int, int, int],
+        region: tuple[int, int, int, int],
+    ) -> bool:
+        """检查图层在指定区域内是否有显著不透明像素。
+
+        对组用 composite()，对叶图层用 topil()。
+        使用 stride=4 采样以提高性能。
+        结果图像会缓存到 _phase3_img_cache 中避免重复合成。
+        """
+        try:
+            layer_id = id(layer)
+            if layer_id in self._phase3_img_cache:
+                img = self._phase3_img_cache[layer_id]
+            else:
+                if hasattr(layer, 'is_group') and layer.is_group():
+                    img = layer.composite()
+                else:
+                    img = layer.topil()
+                    if img is None and hasattr(layer, 'composite'):
+                        img = layer.composite()
+                if img is not None and img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                self._phase3_img_cache[layer_id] = img
+            if img is None:
+                return False
+
+            # 从 img 中提取 region 对应的区域
+            rx0 = region[0] - layer_bbox[0]
+            ry0 = region[1] - layer_bbox[1]
+            rx1 = region[2] - layer_bbox[0]
+            ry1 = region[3] - layer_bbox[1]
+
+            # 边界裁剪
+            rx0 = max(0, rx0)
+            ry0 = max(0, ry0)
+            rx1 = min(img.size[0], rx1)
+            ry1 = min(img.size[1], ry1)
+
+            if rx1 <= rx0 or ry1 <= ry0:
+                return False
+
+            # stride=4 采样检查 alpha
+            arr = np.array(img)
+            patch_alpha = arr[ry0:ry1:4, rx0:rx1:4, 3]
+            return int(patch_alpha.max()) > _ALPHA_OPAQUE_THRESHOLD
+
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # 光效层混合合成（Phase 4 辅助）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _blend_light_layer(
+        base_arr: np.ndarray,
+        light_arr: np.ndarray,
+        blend_mode_str: str,
+        opacity: float,
+    ) -> np.ndarray:
+        """在 base_arr 上按指定光效 blend mode 合成 light_arr。
+
+        base_arr, light_arr: (H, W, 4) float32, 值域 [0, 1]
+        blend_mode_str: psd-tools blend mode 字符串（如 "BlendMode.SCREEN"）
+        opacity: 光效层不透明度 [0, 1]
+        """
+        bm = blend_mode_str.upper()
+        fg_rgb = light_arr[:, :, :3]
+        fg_a = light_arr[:, :, 3:4] * opacity
+        bg_rgb = base_arr[:, :, :3]
+        bg_a = base_arr[:, :, 3:4]
+
+        # 按 blend mode 计算混合后的 RGB
+        if 'COLOR_DODGE' in bm:
+            # color dodge: bg / (1 - fg), clamp
+            denom = np.maximum(1.0 - fg_rgb, 1e-10)
+            blended = np.clip(bg_rgb / denom, 0, 1)
+        elif 'LINEAR_DODGE' in bm:
+            # linear dodge (add): bg + fg, clamp
+            blended = np.clip(bg_rgb + fg_rgb, 0, 1)
+        elif 'SCREEN' in bm:
+            # screen: 1 - (1 - bg) * (1 - fg)
+            blended = 1.0 - (1.0 - bg_rgb) * (1.0 - fg_rgb)
+        elif 'LIGHTER_COLOR' in bm:
+            # lighter color: 取整体亮度更高的颜色
+            bg_lum = 0.299 * bg_rgb[:, :, 0:1] + 0.587 * bg_rgb[:, :, 1:2] + 0.114 * bg_rgb[:, :, 2:3]
+            fg_lum = 0.299 * fg_rgb[:, :, 0:1] + 0.587 * fg_rgb[:, :, 1:2] + 0.114 * fg_rgb[:, :, 2:3]
+            blended = np.where(fg_lum > bg_lum, fg_rgb, bg_rgb)
+        elif 'LIGHTEN' in bm:
+            # lighten: max(bg, fg)
+            blended = np.maximum(bg_rgb, fg_rgb)
+        else:
+            # fallback: normal
+            blended = fg_rgb
+
+        # ── 光效层合成：仅在底层有内容的区域起作用 ──
+        # PSD 中光效 blend mode（COLOR_DODGE/SCREEN 等）的语义是"附着于底层"：
+        # - 只改变底层已有像素的颜色/亮度
+        # - 底层透明的区域，光效层不产生新像素
+        # - 输出 alpha = 底层 alpha（光效层不增加覆盖面积）
+        #
+        # 如果用标准 Porter-Duff OVER（out_a = fg_a + bg_a*(1-fg_a)），
+        # 光效层的黑色像素（fg_rgb=0, fg_a>0）会在底层透明区域
+        # "填充"出黑色新像素——这就是黑底问题的根源。
+        #
+        # 正确做法：
+        # 1. blended RGB 只在 bg_a > 0 的区域有效
+        # 2. 在有底的区域，按 fg_a 在 blended 和 bg_rgb 之间插值
+        # 3. 输出 alpha 不超过底层 alpha（光效层不拓展覆盖范围）
+
+        # 在底层有内容的像素上，按 fg_a 在 bg_rgb 和 blended 之间插值
+        # 底层透明（bg_a ≈ 0）时 mix_factor = 0，光效无效 → 不产生新像素
+        has_bg = (bg_a > 1e-6).astype(np.float32)
+        mix_factor = fg_a * has_bg
+        out_rgb = bg_rgb * (1.0 - mix_factor) + blended * mix_factor
+
+        # 输出 alpha = 底层 alpha（光效层不增加覆盖面积）
+        out_a = bg_a
+
+        result = np.empty_like(base_arr)
+        result[:, :, :3] = np.clip(out_rgb, 0, 1)
+        result[:, :, 3:4] = np.clip(out_a, 0, 1)
+        return result
 
     def _save_image_dedup(self, img: Image.Image, name: str, depth: int) -> str:
         """
@@ -477,6 +918,17 @@ class LayerExporter:
         Args:
             clip_bbox: 可选的裁剪区域 (left, top, right, bottom)，用于裁剪到父组范围
         """
+        # ── Phase 5: 光效层抑制 ──
+        # 被标记 needs_penetrate 且已映射到目标层的光效层，其效果已通过
+        # Phase 4 在目标层 PNG 上做了正确的像素级合成。自身不应再独立导出，
+        # 否则 CSS mix-blend-mode 无法穿透 PASS_THROUGH 组的 DOM 容器边界
+        # （position:absolute + overflow:hidden 创建 stacking context），
+        # 导致黑色恒等色像素暴露为真实黑底。
+        if id(layer) in self._suppressed_light_layers:
+            print(f"{'  ' * depth}🔦 {layer_name} (光效穿透层，已合成到目标层，跳过独立导出)")
+            self.skipped_count += 1
+            return None
+
         try:
             self._z_counter += 1
 
@@ -557,6 +1009,92 @@ class LayerExporter:
             print(f"{'  ' * depth}❌ {layer_name} 导出失败: {e}")
             self.skipped_count += 1
             return None
+
+    def _apply_penetrate_light_layers(
+        self,
+        img: Image.Image,
+        bbox: tuple[int, int, int, int],
+        light_layers: list[LightEffectLayerInfo],
+        layer_name: str,
+        depth: int,
+    ) -> tuple[Image.Image, tuple[int, int, int, int]]:
+        """Phase 4: 在底层图片上叠加穿透光效层。
+
+        对每个关联的光效层，渲染其像素并按对应 blend mode 合成到 base 上。
+        光效层的 bbox 可能与 base 不完全重合，需要计算重叠区域并对齐坐标。
+
+        Returns:
+            (合成后的 img, 合成后的 bbox)
+            bbox 不会被光效层扩展（光效层只在底层有内容的区域起作用，
+            不增加覆盖面积）。
+        """
+        base_arr = ImageArrayUtils.pil_to_float_array(img)
+        current_bbox = bbox
+
+        for light_info in light_layers:
+            try:
+                light_layer = light_info.layer
+                light_bbox = light_info.bbox
+
+                # 渲染光效层像素
+                light_result = render_layer_with_effects(light_layer)
+                if light_result is not None:
+                    light_img, light_eff_bbox = light_result
+                else:
+                    light_img = light_layer.topil()
+                    light_eff_bbox = light_bbox
+
+                if light_img is None:
+                    continue
+                if light_img.mode != 'RGBA':
+                    light_img = light_img.convert('RGBA')
+
+                # 应用光效层的图层蒙版
+                light_img = _apply_layer_mask(light_layer, light_img, light_eff_bbox)
+
+                # 计算 base 与光效层的交集区域（光效层只在交集内起作用）
+                # 光效层不扩展 base 的 bbox——因为它只在底层有内容处起作用
+                inter = self._intersect_bbox(current_bbox, light_eff_bbox)
+                if inter is None:
+                    continue
+
+                inter_w = inter[2] - inter[0]
+                inter_h = inter[3] - inter[1]
+                if inter_w <= 0 or inter_h <= 0:
+                    continue
+
+                # 从 base_arr 中提取交集区域
+                base_y0 = inter[1] - current_bbox[1]
+                base_x0 = inter[0] - current_bbox[0]
+                base_region = base_arr[base_y0:base_y0+inter_h, base_x0:base_x0+inter_w].copy()
+
+                # 从 light_img 中提取交集区域
+                light_arr_full = ImageArrayUtils.pil_to_float_array(light_img)
+                light_y0 = inter[1] - light_eff_bbox[1]
+                light_x0 = inter[0] - light_eff_bbox[0]
+                light_region = light_arr_full[light_y0:light_y0+inter_h, light_x0:light_x0+inter_w]
+
+                # 在交集区域内做 blend
+                blended_region = self._blend_light_layer(
+                    base_region, light_region,
+                    str(light_layer.blend_mode),
+                    light_layer.opacity / 255.0,
+                )
+
+                # 写回 base_arr（bbox 不变）
+                base_arr[base_y0:base_y0+inter_h, base_x0:base_x0+inter_w] = blended_region
+                # current_bbox 保持不变（光效层不扩展覆盖范围）
+
+                light_name = light_info.layer.name or 'light'
+                print(f"{'  ' * depth}💡 {layer_name} ← 叠加光效 {light_name} "
+                      f"(blend={str(light_layer.blend_mode)})")
+
+            except Exception as e:
+                light_name = getattr(light_info.layer, 'name', '?')
+                print(f"{'  ' * depth}⚠️  叠加光效 {light_name} 失败: {e}")
+
+        result_img = ImageArrayUtils.float_array_to_pil(base_arr)
+        return result_img, current_bbox
 
     def _export_clipped_layer_against_group_base(
         self,
@@ -811,11 +1349,25 @@ class LayerExporter:
             img = img.convert('RGBA')
         img = _apply_layer_mask(layer, img, bbox)
 
+        # ── 2.6. 应用祖先组的 layer mask（group mask 传播）──
+        # 当祖先组不走 merge_all 路径时，组自身的 mask 不会通过 composite()
+        # 自动应用到子层，需要显式裁剪。
+        for ancestor_layer, _ancestor_bbox in self._ancestor_group_masks:
+            img = _apply_layer_mask(ancestor_layer, img, bbox)
+
         # 检查 mask 后是否完全透明
         img_check = np.array(img)
         if img_check[:, :, 3].max() == 0:
             print(f"{'  ' * depth}🚫 {layer_name} (mask后完全透明)")
             return None
+
+        # ── 2.7. 叠加穿透光效层（Phase 4）──
+        # 如果当前图层在 penetrate_map 中有对应的光效层，叠加渲染
+        light_layers = self._penetrate_map.get(id(layer), [])
+        if light_layers:
+            img, bbox = self._apply_penetrate_light_layers(
+                img, bbox, light_layers, layer_name, depth,
+            )
 
         # ── 3. 裁剪到画布边界（保留子图层效果，不裁剪到父组边界）──
         left, top, right, bottom = bbox
@@ -1123,6 +1675,29 @@ class LayerExporter:
                 print(f"{'  ' * depth}🚫 {group_name} (合并后完全透明)")
                 return None
 
+            # ── Phase 4 补充：组合成后叠加穿透光效层 ──
+            # 当目标层是组（group）时，Phase 3 用 id(group_layer) 记录到
+            # penetrate_map，但 Phase 4 原来只在 _export_layer_image（叶图层路径）
+            # 中检查。组走 _merge_group_as_single_image 不经过那里，
+            # 导致光效层永远无法合成到组目标上。此处补全。
+            group_light_layers = self._penetrate_map.get(id(group_layer), [])
+            if group_light_layers:
+                # 构造当前合成图的实际 bbox（裁剪后）
+                actual_left = orig_abs_left + adj_left
+                actual_top = orig_abs_top + adj_top
+                actual_bbox = (actual_left, actual_top,
+                               actual_left + actual_w, actual_top + actual_h)
+                composite_img, actual_bbox = self._apply_penetrate_light_layers(
+                    composite_img, actual_bbox, group_light_layers,
+                    group_name, depth,
+                )
+                # bbox 不会被光效层扩展（光效层只在有底处起作用）
+                # 但仍需从返回值中取（保持接口一致性）
+                actual_w = actual_bbox[2] - actual_bbox[0]
+                actual_h = actual_bbox[3] - actual_bbox[1]
+                orig_abs_left = actual_bbox[0] - adj_left
+                orig_abs_top = actual_bbox[1] - adj_top
+
             self._z_counter += 1
             rel_left = orig_abs_left - parent_left + adj_left
             rel_top = orig_abs_top - parent_top + adj_top
@@ -1246,10 +1821,24 @@ class LayerExporter:
         # 收缩到 cluster 的视觉 union，但效果溢出会被裁。所以我们仍走
         # _merge_group_as_single_image 的统一逻辑：用整组 bbox + expand）。
 
+        # ── Phase 5 补充：从 cluster 中排除被抑制的光效层 ──
+        # 被 _suppressed_light_layers 标记的光效层，其效果已通过 Phase 4
+        # 在外部目标层上合成。如果仍参与组内 composite()，黑色恒等色像素
+        # 会被烧进合成图（COLOR_DODGE/SCREEN 等模式下黑色 = 恒等色，
+        # 在 PSD 原生合成中"透明"但在 composite() 输出中暴露为真实黑底）。
+        # 因此将其临时隐藏，不参与合成。
+        suppressed_in_cluster: list[Any] = []
+        for m in cluster_members:
+            if id(m) in self._suppressed_light_layers:
+                suppressed_in_cluster.append(m)
+
         # 隐藏所有不在 cluster 内的 sibling（直接子）
+        # + 同时隐藏 cluster 内被抑制的光效层
         saved: list[tuple[Any, bool]] = []
+        suppressed_ids = {id(m) for m in suppressed_in_cluster}
         for c in group_layer:
-            if id(c) in member_ids:
+            cid = id(c)
+            if cid in member_ids and cid not in suppressed_ids:
                 continue
             if not c.visible:
                 continue
@@ -1259,11 +1848,18 @@ class LayerExporter:
             except Exception:
                 pass
 
+        if suppressed_in_cluster:
+            suppressed_names = [m.name for m in suppressed_in_cluster]
+            print(f"{'  ' * depth}🔦 cluster 内排除光效层: {suppressed_names} "
+                  f"(已穿透合成到外部目标层)")
+
         try:
             mname = f"{group_name}{suffix}" if suffix else group_name
             mfull = f"{full_name}{suffix}" if suffix else full_name
+            # 更新日志中的层数（排除被抑制的光效层）
+            effective_members = [m for m in cluster_members if id(m) not in suppressed_ids]
             print(f"{'  ' * depth}🧬 合并 cluster: {mname} "
-                  f"({len(cluster_members)}层: {[m.name for m in cluster_members]})")
+                  f"({len(effective_members)}层: {[m.name for m in effective_members]})")
             return self._merge_group_as_single_image(
                 group_layer, mname, mfull,
                 depth, parent_left, parent_top,

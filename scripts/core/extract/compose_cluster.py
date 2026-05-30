@@ -134,6 +134,42 @@ def _is_adjustment(layer: Any) -> bool:
     return False
 
 
+def _is_group_recursively_empty(group_layer: Any) -> bool:
+    """递归判断一个组是否完全没有可见像素贡献。
+
+    "递归为空"定义：组内所有子层（递归展开）都不产生任何视觉像素。
+    具体地，对每个子层：
+      - 不可见 / opacity=0 → 无贡献
+      - 调整层 → 自身无像素（仅修改下方颜色），视为无贡献
+      - 文本层 / 像素层 → 有贡献（返回 False）
+      - 子组 → 递归检查
+
+    典型案例：空的 PASS_THROUGH 组 + opacity<255 会在 psd-tools composite 中
+    因 shape_g=0 → divide-by-zero → clip(1.0) 产生白色污染。这类组在独立
+    cluster 合成时应被排除。
+    """
+    try:
+        children = list(group_layer)
+    except Exception:
+        return True
+
+    for c in children:
+        if not getattr(c, 'visible', True):
+            continue
+        if getattr(c, 'opacity', 255) == 0:
+            continue
+        if _is_adjustment(c):
+            # 调整层自身无像素
+            continue
+        if getattr(c, 'is_group', lambda: False)():
+            if not _is_group_recursively_empty(c):
+                return False
+        else:
+            # 叶子图层（text / pixel / shape / smartobject）→ 有像素
+            return False
+    return True
+
+
 def _classify_layer(layer: Any) -> LayerKind:
     """单图层在合成图谱里的分类。"""
     if getattr(layer, 'is_group', lambda: False)():
@@ -314,6 +350,12 @@ def detect_compose_clusters(group_layer: Any) -> list[ComposeCluster]:
             if not getattr(c, 'visible', True):
                 continue
             if getattr(c, 'opacity', 255) == 0:
+                continue
+            # B方案：排除递归为空的组——它们不产生任何可见像素，
+            # 但在独立 cluster 合成时会因 psd-tools 的 divide-by-zero
+            # （shape_g=0 → clip(1.0)）产生白色污染。
+            if (getattr(c, 'is_group', lambda: False)()
+                    and _is_group_recursively_empty(c)):
                 continue
             children.append(c)
     except Exception:

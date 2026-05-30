@@ -161,7 +161,7 @@ output/<psd_stem>/
 
 ```
 Python 3.10+
-psd-tools >= 1.14
+psd-tools >= 1.17.1
 Pillow >= 10
 numpy
 beautifulsoup4

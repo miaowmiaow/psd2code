@@ -266,7 +266,7 @@ IR Document（pydantic 校验）
 ## 依赖
 
 - Python 3.10+
-- psd-tools >= 1.14
+- psd-tools >= 1.17.1
 - Pillow >= 10
 - numpy
 - beautifulsoup4
