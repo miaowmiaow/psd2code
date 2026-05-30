@@ -25,9 +25,3 @@ htmlcov/
 .idea/
 .vscode/
 
-# === 仅 GitHub 需要的文件，内网仓库忽略 ===
-LICENSE
-.github/
-CONTRIBUTING.md
-README.en.md
-pyproject.toml

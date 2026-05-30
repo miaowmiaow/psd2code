@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psd2code"
+version = "0.1.0"
+description = "PSD → HTML / React / Vue compiler. Pixel-perfect, IR-based, with smart Flex inference and semantic class naming."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "miaowmiaow" },
+]
+keywords = [
+    "psd",
+    "psd-to-html",
+    "psd-to-react",
+    "psd-to-vue",
+    "psd-to-code",
+    "photoshop",
+    "design-to-code",
+    "code-generator",
+    "layout-engine",
+    "flexbox",
+    "pixel-perfect",
+    "h5",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Internet :: WWW/HTTP :: Site Management",
+]
+dependencies = [
+    "psd-tools>=1.9",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "beautifulsoup4>=4.12",
+    "pydantic>=2.0",
+    "pypinyin>=0.50",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.urls]
+Homepage      = "https://github.com/miaowmiaow/psd2code"
+Repository    = "https://github.com/miaowmiaow/psd2code"
+Documentation = "https://github.com/miaowmiaow/psd2code/blob/master/doc/README.md"
+Issues        = "https://github.com/miaowmiaow/psd2code/issues"
+
+[project.scripts]
+psd2code = "psd_to_code:main"
+
+# 仓库结构特殊：源码在 scripts/ 下作为顶级包（framework / targets / core / common / config / semantic），
+# 入口脚本 psd_to_code.py 在仓库根目录。这里用 py-modules + packages 同时打包。
+[tool.setuptools]
+py-modules = ["psd_to_code"]
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+include = ["framework*", "targets*", "core*", "common*", "config*", "semantic*"]
+
+[tool.setuptools.package-data]
+"common" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
