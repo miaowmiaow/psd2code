@@ -201,9 +201,11 @@ class PrunePreOptimizeStage(Stage):
             )
 
             pruned_n = prune_stats.get("occluded_layers_pruned", 0)
-            if pruned_n > 0:
+            trimmed_n = prune_stats.get("trimmed_layers", 0)
+            if pruned_n > 0 or trimmed_n > 0:
                 # 写回原文件（覆盖）：让 index.html 与 index_optimized.html
                 # 在"被剔除图层"这一维度上保持一致。
+                # 也包括 trim 操作改写的 CSS url 引用。
                 html_path.write_text(html_pruned, encoding="utf-8")
                 css_path.write_text(
                     dict_to_css(css_rules_pruned, header=css_header),
@@ -212,6 +214,7 @@ class PrunePreOptimizeStage(Stage):
                 ctx.log(
                     f"pre-optimize prune: 剔除 {pruned_n} 个图层 "
                     f"(节省 {prune_stats.get('occluded_bytes_saved', 0) / 1024:.1f} KB)"
+                    + (f", 裁剪 {trimmed_n} 个图层" if trimmed_n > 0 else "")
                 )
             else:
                 ctx.log("pre-optimize prune: 无可剔除图层")

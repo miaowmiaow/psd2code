@@ -109,3 +109,103 @@ def _alpha_composite_numpy(dst: 'np.ndarray', src: 'np.ndarray') -> 'np.ndarray'
     result[:, :, :3] = out_rgb
     result[:, :, 3:4] = out_a
     return result
+
+
+def _blend_composite_numpy(
+    dst: 'np.ndarray', src: 'np.ndarray', blend_mode: str = 'normal',
+) -> 'np.ndarray':
+    """
+    带混合模式的合成（numpy 版本）。
+
+    Photoshop 合成公式：
+        blended_rgb = blend_func(dst_rgb, src_rgb)
+        out_rgb = (1 - src_a) * dst_rgb + src_a * blended_rgb  (在 dst 覆盖区域)
+        out_a = src_a + dst_a * (1 - src_a)
+
+    dst, src: (H, W, 4) float32, 值域 [0, 1]
+    blend_mode: psd-tools blend mode 字符串（如 "BlendMode.DIVIDE"）或简短名
+    """
+    # 对 NORMAL 模式直接走快速路径
+    bm = blend_mode.upper()
+    bm_short = bm.split('.')[-1] if '.' in bm else bm
+
+    if bm_short == 'NORMAL' or bm_short == '':
+        return _alpha_composite_numpy(dst, src)
+
+    src_rgb = src[:, :, :3]
+    src_a = src[:, :, 3:4]
+    dst_rgb = dst[:, :, :3]
+    dst_a = dst[:, :, 3:4]
+
+    # 计算混合后的 RGB
+    if bm_short == 'DIVIDE':
+        # Photoshop DIVIDE: result = dst / src (clamp to [0,1])
+        # 当 src 接近 0 时，结果趋向 1（白色）
+        safe_src = np.maximum(src_rgb, 1.0 / 255.0)
+        blended_rgb = np.clip(dst_rgb / safe_src, 0.0, 1.0)
+    elif bm_short == 'MULTIPLY':
+        blended_rgb = dst_rgb * src_rgb
+    elif bm_short == 'SCREEN':
+        blended_rgb = 1.0 - (1.0 - dst_rgb) * (1.0 - src_rgb)
+    elif bm_short == 'OVERLAY':
+        # overlay = 2*a*b if a < 0.5 else 1 - 2*(1-a)*(1-b)
+        blended_rgb = np.where(
+            dst_rgb < 0.5,
+            2.0 * dst_rgb * src_rgb,
+            1.0 - 2.0 * (1.0 - dst_rgb) * (1.0 - src_rgb),
+        )
+    elif bm_short == 'SOFT_LIGHT':
+        blended_rgb = np.where(
+            src_rgb <= 0.5,
+            dst_rgb - (1.0 - 2.0 * src_rgb) * dst_rgb * (1.0 - dst_rgb),
+            dst_rgb + (2.0 * src_rgb - 1.0) * (np.sqrt(dst_rgb) - dst_rgb),
+        )
+    elif bm_short == 'HARD_LIGHT':
+        blended_rgb = np.where(
+            src_rgb < 0.5,
+            2.0 * dst_rgb * src_rgb,
+            1.0 - 2.0 * (1.0 - dst_rgb) * (1.0 - src_rgb),
+        )
+    elif bm_short == 'COLOR_DODGE':
+        safe_denom = np.maximum(1.0 - src_rgb, 1.0 / 255.0)
+        blended_rgb = np.clip(dst_rgb / safe_denom, 0.0, 1.0)
+    elif bm_short == 'COLOR_BURN':
+        safe_src2 = np.maximum(src_rgb, 1.0 / 255.0)
+        blended_rgb = np.clip(1.0 - (1.0 - dst_rgb) / safe_src2, 0.0, 1.0)
+    elif bm_short == 'LINEAR_DODGE' or bm_short == 'ADD':
+        blended_rgb = np.clip(dst_rgb + src_rgb, 0.0, 1.0)
+    elif bm_short == 'LINEAR_BURN':
+        blended_rgb = np.clip(dst_rgb + src_rgb - 1.0, 0.0, 1.0)
+    elif bm_short == 'DIFFERENCE':
+        blended_rgb = np.abs(dst_rgb - src_rgb)
+    elif bm_short == 'EXCLUSION':
+        blended_rgb = dst_rgb + src_rgb - 2.0 * dst_rgb * src_rgb
+    elif bm_short == 'SUBTRACT':
+        blended_rgb = np.clip(dst_rgb - src_rgb, 0.0, 1.0)
+    elif bm_short == 'DARKEN':
+        blended_rgb = np.minimum(dst_rgb, src_rgb)
+    elif bm_short == 'LIGHTEN':
+        blended_rgb = np.maximum(dst_rgb, src_rgb)
+    elif bm_short in ('VIVID_LIGHT', 'LINEAR_LIGHT', 'PIN_LIGHT', 'HARD_MIX'):
+        # 近似用 hard-light
+        blended_rgb = np.where(
+            src_rgb < 0.5,
+            2.0 * dst_rgb * src_rgb,
+            1.0 - 2.0 * (1.0 - dst_rgb) * (1.0 - src_rgb),
+        )
+    else:
+        # 不认识的模式 → 退化为 normal
+        return _alpha_composite_numpy(dst, src)
+
+    # Photoshop 合成公式（带 alpha）：
+    # result_rgb = (src_a * blended_rgb + dst_a * dst_rgb * (1 - src_a)) / out_a
+    # result_a = src_a + dst_a * (1 - src_a)
+    out_a = src_a + dst_a * (1.0 - src_a)
+    safe_a = np.maximum(out_a, 1e-10)
+    out_rgb = (src_a * blended_rgb + dst_a * dst_rgb * (1.0 - src_a)) / safe_a
+
+    result = np.empty_like(dst)
+    result[:, :, :3] = np.clip(out_rgb, 0.0, 1.0)
+    result[:, :, 3:4] = out_a
+
+    return result

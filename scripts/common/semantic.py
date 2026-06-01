@@ -150,11 +150,18 @@ def _match_keyword(lower_name: str) -> str | None:
 
 
 def _to_kebab(raw: str) -> str:
-    """把 ASCII 字符串归一化为 kebab-case，保证全安全字符。"""
+    """把 ASCII 字符串归一化为 kebab-case，保证全安全字符。
+
+    CSS 标识符规范要求不能以数字开头（否则 ``.18th-anniversary`` 是无效选择器，
+    浏览器会完全忽略该规则）。若归一化后仍以数字开头，则加 ``n`` 前缀。
+    """
     # 下划线、空格、点号都视为分隔符
     s = re.sub(r"[_\s.]+", "-", raw.lower())
     s = _SAFE_CHARS.sub("-", s)        # 其他非法字符也归一化为 "-"
     s = re.sub(r"-+", "-", s).strip("-")
+    # CSS 标识符不能以数字或连字符+数字开头 → 加 "n" 前缀
+    if s and s[0].isdigit():
+        s = "n" + s
     return s
 
 

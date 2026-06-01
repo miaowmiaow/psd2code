@@ -38,6 +38,7 @@ from .image_ops import (
     _constrain_bbox_to_canvas,
     _apply_layer_mask,
     _alpha_composite_numpy,
+    _blend_composite_numpy,
 )
 from .handlers import HandlerContext, run_handlers
 
@@ -73,6 +74,12 @@ class LightEffectLayerInfo:
     bbox: tuple[int, int, int, int]           # (left, top, right, bottom)
     parent_pt_group: Any                      # 所在的 PASS_THROUGH 父组
     needs_penetrate: bool = False             # Phase 2 判定结果
+    fallback_css_blend: bool = False          # Phase 3 判定：所有目标无效时降级为 CSS blend
+
+
+#: 目标亮度阈值：光效合成到亮度 >= 此值的区域时，效果近似无效
+#: COLOR_DODGE(white, fg) ≈ white, SCREEN(white, fg) ≈ white
+_LIGHT_TARGET_BRIGHTNESS_THRESHOLD = 0.92
 
 
 # Photoshop 混合模式 → CSS mix-blend-mode
@@ -162,6 +169,11 @@ class LayerExporter:
         # 导致黑色恒等色像素暴露为真实黑底。
         self._suppressed_light_layers: set[int] = set()
 
+        # Phase 5 补充：降级为 CSS blend 的光效层 id 集合
+        # needs_penetrate=True 但所有穿透目标无效（纯白/高亮度），
+        # 不走像素级烘焙，而是去除黑色恒等色后独立导出 + CSS mix-blend-mode。
+        self._fallback_light_layers: set[int] = set()
+
         self._pre_scan_light_layers(psd)
 
     # ------------------------------------------------------------------
@@ -241,13 +253,30 @@ class LayerExporter:
                   f"需叠加光效")
 
         # ── Phase 5: 构建抑制集合 ──
-        # 已被 Phase 4 映射到目标层的光效层，不应再独立导出（避免黑底）
+        # 已被 Phase 4 映射到有效目标层的光效层，不应再独立导出（避免黑底）
+        # 收集所有被有效映射的光效层 id
+        effectively_mapped: set[int] = set()
         for light_list in self._penetrate_map.values():
             for li in light_list:
-                self._suppressed_light_layers.add(id(li.layer))
+                effectively_mapped.add(id(li.layer))
+
+        for li_id in effectively_mapped:
+            self._suppressed_light_layers.add(li_id)
+
         if self._suppressed_light_layers:
             print(f"   🚫 抑制独立导出: {len(self._suppressed_light_layers)} "
                   f"个光效层（已合成到目标层）")
+
+        # ── Phase 5 补充：标记降级为 CSS blend 的光效层 ──
+        # needs_penetrate=True 但所有目标都被亮度过滤（penetrate_map 中无记录）的光效层，
+        # 不应被抑制——改为降级导出：去除恒等色（黑底）后独立导出 + CSS mix-blend-mode
+        self._fallback_light_layers: set[int] = set()
+        for info in penetrate_candidates:
+            if id(info.layer) not in effectively_mapped:
+                info.fallback_css_blend = True
+                self._fallback_light_layers.add(id(info.layer))
+                print(f"   🔄 {info.layer.name} → 降级为 CSS blend "
+                      f"(所有穿透目标无效)")
 
         # 释放 Phase 3 临时图像缓存（可能占用大量内存）
         self._phase3_img_cache.clear()
@@ -395,6 +424,17 @@ class LayerExporter:
             if not self._has_opaque_in_region(sib, sib_bbox, inter):
                 continue
 
+            # ── 新增：检查目标是否为"有效合成目标" ──
+            # 光效 blend mode 的数学特性：在接近白色的区域结果仍 ≈ 白色
+            # （如 COLOR_DODGE(white, fg) = white），合成等于无效操作。
+            # 跳过亮度过高的目标，避免光效被"吃掉"。
+            if not self._is_effective_light_target(sib, sib_bbox, inter, info):
+                sib_name = getattr(sib, 'name', '?')
+                light_name = getattr(info.layer, 'name', '?')
+                print(f"   ⚡ 跳过无效目标 '{sib_name}' "
+                      f"(亮度过高, 光效 '{light_name}' 合成无效)")
+                continue
+
             # 记录到 penetrate_map
             target_id = id(sib)
             if target_id not in self._penetrate_map:
@@ -474,6 +514,125 @@ class LayerExporter:
 
         except Exception:
             return False
+
+    def _is_effective_light_target(
+        self,
+        sib: Any,
+        sib_bbox: tuple[int, int, int, int],
+        inter: tuple[int, int, int, int],
+        info: LightEffectLayerInfo,
+    ) -> bool:
+        """检查目标层在交集区域的颜色是否能让光效产生有意义的视觉效果。
+
+        光效 blend mode 的数学特性：
+        - COLOR_DODGE(white, fg) = white（无效）
+        - SCREEN(white, fg) = white（无效）
+        - LINEAR_DODGE(white, fg) = clamp(white+fg) = white（无效）
+        - LIGHTEN(white, fg) = white（无效）
+
+        如果目标层在交集区域内的不透明像素平均亮度 >= 阈值，
+        认为光效合成到此目标上不会产生有意义的视觉变化。
+
+        Returns:
+            True 如果目标有效（颜色足够深，光效能产生效果），
+            False 如果目标无效（颜色过亮，光效合成等于无效操作）。
+        """
+        try:
+            layer_id = id(sib)
+            if layer_id in self._phase3_img_cache:
+                img = self._phase3_img_cache[layer_id]
+            else:
+                # 缓存应该在 _has_opaque_in_region 中已建立
+                # 兜底：重新获取
+                if hasattr(sib, 'is_group') and sib.is_group():
+                    img = sib.composite()
+                else:
+                    img = sib.topil()
+                    if img is None and hasattr(sib, 'composite'):
+                        img = sib.composite()
+                if img is not None and img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                self._phase3_img_cache[layer_id] = img
+
+            if img is None:
+                return True  # 保守：获取失败时认为有效
+
+            # 从 img 中提取交集区域
+            rx0 = inter[0] - sib_bbox[0]
+            ry0 = inter[1] - sib_bbox[1]
+            rx1 = inter[2] - sib_bbox[0]
+            ry1 = inter[3] - sib_bbox[1]
+
+            rx0 = max(0, rx0)
+            ry0 = max(0, ry0)
+            rx1 = min(img.size[0], rx1)
+            ry1 = min(img.size[1], ry1)
+
+            if rx1 <= rx0 or ry1 <= ry0:
+                return True  # 无区域可检查，保守认为有效
+
+            # stride=4 采样，计算不透明像素的平均亮度
+            arr = np.array(img, dtype=np.float32)
+            patch = arr[ry0:ry1:4, rx0:rx1:4]  # (H, W, 4)
+
+            # 只看不透明像素（alpha > threshold）
+            alpha = patch[:, :, 3]
+            opaque_mask = alpha > _ALPHA_OPAQUE_THRESHOLD
+
+            if not opaque_mask.any():
+                return True  # 无不透明像素，保守认为有效
+
+            # 计算不透明像素的亮度 (ITU-R BT.601)
+            rgb = patch[:, :, :3] / 255.0
+            luminance = (0.299 * rgb[:, :, 0]
+                         + 0.587 * rgb[:, :, 1]
+                         + 0.114 * rgb[:, :, 2])
+
+            avg_lum = float(luminance[opaque_mask].mean())
+
+            # 如果平均亮度 >= 阈值，认为光效合成无效
+            return avg_lum < _LIGHT_TARGET_BRIGHTNESS_THRESHOLD
+
+        except Exception:
+            return True  # 异常时保守认为有效
+
+    @staticmethod
+    def _remove_identity_color(img: Image.Image) -> Image.Image:
+        """去除光效层中黑色恒等色区域的不透明度（渐进衰减）。
+
+        光效 blend mode（COLOR_DODGE/SCREEN/LINEAR_DODGE 等）中，黑色是恒等色
+        （与底色混合结果 = 底色）。当光效层降级为独立 DOM 元素 + CSS blend 时，
+        PNG 中的黑色像素如果保持 alpha=255 会暴露为真实黑底。
+
+        解决方案：用像素亮度作为 alpha 的调制因子——
+        - 纯黑 (lum=0) → alpha 衰减到 0（完全透明）
+        - 亮色 (lum>=threshold) → alpha 保持不变
+        - 中间值 → 线性过渡，避免硬边缘
+
+        这样黑色区域变透明，有发光效果的明亮区域保留，配合 CSS mix-blend-mode
+        能正确渲染，且不会产生黑底。
+        """
+        arr = np.array(img, dtype=np.float32)
+        rgb = arr[:, :, :3] / 255.0
+
+        # ITU-R BT.601 亮度
+        luminance = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+        # 衰减曲线：lum < low_threshold 完全透明，> high_threshold 完全保留
+        # 中间线性过渡
+        low_thresh = 0.05   # 纯黑到深灰 → 透明
+        high_thresh = 0.25  # 中灰以上 → 保留
+
+        # 计算调制因子 [0, 1]
+        fade_factor = np.clip(
+            (luminance - low_thresh) / max(high_thresh - low_thresh, 1e-6),
+            0.0, 1.0
+        )
+
+        # 对原始 alpha 应用衰减
+        arr[:, :, 3] *= fade_factor
+
+        return Image.fromarray(arr.astype(np.uint8))
 
     # ------------------------------------------------------------------
     # 光效层混合合成（Phase 4 辅助）
@@ -1371,6 +1530,17 @@ class LayerExporter:
             print(f"{'  ' * depth}🚫 {layer_name} (mask后完全透明)")
             return None
 
+        # ── 2.6b. 降级光效层去恒等色处理 ──
+        # 对于降级为 CSS blend 的光效层（所有穿透目标无效），需要将黑色恒等色区域
+        # 的 alpha 渐变为 0，避免 CSS mix-blend-mode 时黑底暴露。
+        # 原理：COLOR_DODGE/SCREEN/LINEAR_DODGE 等模式下黑色是恒等色（与任何底色
+        # 混合结果 = 底色），所以黑色区域在 CSS blend 中本应"透明"。
+        # 但 PNG 中黑色像素有 alpha=255，会暴露为真实黑底。
+        # 解决：用亮度作为 alpha 衰减因子——越暗的像素越透明。
+        if id(layer) in self._fallback_light_layers:
+            img = self._remove_identity_color(img)
+            print(f"{'  ' * depth}🔄 {layer_name} (降级光效: 去除恒等色黑底)")
+
         # ── 2.7. 叠加穿透光效层（Phase 4）──
         # 如果当前图层在 penetrate_map 中有对应的光效层，叠加渲染
         light_layers = self._penetrate_map.get(id(layer), [])
@@ -1442,6 +1612,36 @@ class LayerExporter:
     # 触发条件由 compose_cluster.decide_group_merge() 给出，
     # 不再使用启发式（按钮关键词 / 文本数量等）。
     # ------------------------------------------------------------------
+
+    def _group_has_overlay_effects(self, group_layer: Any) -> bool:
+        """检查组内是否有非溢出型效果（渐变叠加/颜色叠加）。
+        
+        psd-tools 的 composite() 对 GradientOverlay 渲染有问题
+        （尤其是 Align with Layer 时使用错误的渐变范围），
+        因此需要检测并走 hybrid 路径用我们自己的渲染器处理。
+        """
+        overlay_effect_names = {'GradientOverlay', 'ColorOverlay'}
+
+        def check_layer(layer) -> bool:
+            if not layer.visible or layer.opacity == 0:
+                return False
+            if layer.is_group():
+                for child in layer:
+                    if check_layer(child):
+                        return True
+                return False
+            if hasattr(layer, 'effects') and layer.effects:
+                for effect in layer.effects:
+                    if not is_effect_active(effect, layer):
+                        continue
+                    if str(effect) in overlay_effect_names:
+                        return True
+            return False
+
+        for child in group_layer:
+            if check_layer(child):
+                return True
+        return False
 
     def _calc_group_expand(self, group_layer: Any) -> int:
         """计算组内所有图层效果溢出所需的最大扩展像素数。"""
@@ -1541,6 +1741,10 @@ class LayerExporter:
             for child in sub_grp:
                 render_layer(child, depth_offset + 1)
 
+        # 检查父组是否为 PASS_THROUGH（用于非 NORMAL 混合模式修正）
+        grp_bm = str(getattr(group_layer, 'blend_mode', '')).upper()
+        grp_is_pass_through = 'PASS_THROUGH' in grp_bm
+
         def render_layer(layer, depth_offset=0):
             if not layer.visible or layer.opacity == 0:
                 return
@@ -1567,13 +1771,352 @@ class LayerExporter:
                 h_copy = y1 - y0
                 w_copy = x1 - x0
                 if h_copy > 0 and w_copy > 0:
-                    canvas[y0:y1, x0:x1] = _alpha_composite_numpy(
-                        canvas[y0:y1, x0:x1],
-                        layer_arr[:h_copy, :w_copy],
-                    )
+                    # 使用带混合模式的合成，正确处理 DIVIDE 等非 NORMAL 模式
+                    bm_str = str(getattr(layer, 'blend_mode', 'NORMAL'))
+                    bm_upper = bm_str.upper()
+                    bm_short = bm_upper.split('.')[-1] if '.' in bm_upper else bm_upper
+                    is_non_normal = bm_short not in ('NORMAL', '')
 
-        for child in group_layer:
-            render_layer(child)
+                    if is_non_normal and grp_is_pass_through:
+                        # ── 修复：PASS_THROUGH 组中非 NORMAL 混合模式的隔离渲染问题 ──
+                        # Photoshop 中 PASS_THROUGH 组不隔离：子图层的混合模式直接
+                        # 作用于父级上下文（而非空画布）。当 hybrid 渲染在空 canvas 上
+                        # 合成 LINEAR_DODGE 等模式时，会在 dst_a=0 区域错误地产生
+                        # 可见像素（如棕色蒙层）。
+                        # 修复方式：在 canvas 无内容（alpha=0）的区域，不叠加非 NORMAL
+                        # 混合图层的像素（因为没有底层内容，混合无意义）。
+                        dst_region = canvas[y0:y1, x0:x1].copy()
+                        blended = _blend_composite_numpy(
+                            dst_region,
+                            layer_arr[:h_copy, :w_copy],
+                            bm_str,
+                        )
+                        # 仅在 dst 有内容（alpha > 0）的区域使用混合结果
+                        dst_has_content = dst_region[:, :, 3:4] > 1e-6
+                        mask4 = np.broadcast_to(dst_has_content, blended.shape)
+                        canvas[y0:y1, x0:x1] = np.where(
+                            mask4, blended, dst_region,
+                        )
+                    else:
+                        canvas[y0:y1, x0:x1] = _blend_composite_numpy(
+                            canvas[y0:y1, x0:x1],
+                            layer_arr[:h_copy, :w_copy],
+                            bm_str,
+                        )
+
+        # 处理剪贴蒙版关系：将 clipping 层与 base 层分组
+        # Photoshop 中 clipping=1 的层会被限制在其下方 base 层的 alpha 范围内
+        children = [c for c in group_layer]
+        i = 0
+        while i < len(children):
+            child = children[i]
+            if not child.visible or child.opacity == 0:
+                i += 1
+                continue
+            # 检查后续是否有 clipping 层
+            clip_layers = []
+            j = i + 1
+            while j < len(children):
+                next_child = children[j]
+                if (hasattr(next_child, '_record')
+                        and hasattr(next_child._record, 'clipping')
+                        and next_child._record.clipping == 1
+                        and next_child.visible and next_child.opacity > 0):
+                    clip_layers.append(next_child)
+                    j += 1
+                else:
+                    break
+            if clip_layers and not child.is_group():
+                # 有 clipping 层：需要处理 base + clipped layers 的组合
+                # 检查是否有调整层（adjustment layer）—— 它们无法独立渲染，
+                # 必须通过 psd-tools composite 在 base 上下文中处理
+                has_adjustment_clip = any(
+                    cl.kind not in ('pixel', 'shape', 'smartobject', 'type', 'group')
+                    for cl in clip_layers
+                )
+                # 检查 base 是否有 overlay effects（渐变/颜色叠加）
+                # psd-tools composite 对这些效果渲染有 bug，不能直接依赖
+                _overlay_names = {'GradientOverlay', 'ColorOverlay'}
+                base_has_overlay = False
+                if hasattr(child, 'effects') and child.effects:
+                    for _eff in child.effects:
+                        if is_effect_active(_eff, child) and str(_eff) in _overlay_names:
+                            base_has_overlay = True
+                            break
+
+                if has_adjustment_clip and not base_has_overlay:
+                    # 含调整层的 clipping 关系（base 无 overlay）：
+                    # 用 psd-tools composite 渲染 base+clips
+                    # 临时隐藏组内其他层，只保留 base + clip layers
+                    clip_set = {id(child)} | {id(cl) for cl in clip_layers}
+                    clip_saved = []
+                    for sibling in group_layer:
+                        if id(sibling) not in clip_set and sibling.visible:
+                            clip_saved.append((sibling, True))
+                            try:
+                                sibling.visible = False
+                            except Exception:
+                                pass
+                    try:
+                        base_bbox = child.bbox
+                        clip_img = group_layer.composite(viewport=base_bbox)
+                        if clip_img is not None:
+                            if clip_img.mode != 'RGBA':
+                                clip_img = clip_img.convert('RGBA')
+                            clip_arr = ImageArrayUtils.pil_to_float_array(clip_img)
+                            # composite 已含 base opacity，不需额外乘
+                            layer_x = base_bbox[0] - grp_bbox[0] + expand
+                            layer_y = base_bbox[1] - grp_bbox[1] + expand
+                            layer_h, layer_w = clip_arr.shape[:2]
+                            y0, y1 = layer_y, layer_y + layer_h
+                            x0, x1 = layer_x, layer_x + layer_w
+                            if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
+                                y1 = min(y1, ext_h)
+                                x1 = min(x1, ext_w)
+                                h_copy = y1 - y0
+                                w_copy = x1 - x0
+                                if h_copy > 0 and w_copy > 0:
+                                    # base 的 blend_mode 已被 composite 处理为
+                                    # NORMAL（composite 输出是最终结果），
+                                    # 直接 src-over 合成到 canvas
+                                    bm_str = str(getattr(child, 'blend_mode', 'NORMAL'))
+                                    canvas[y0:y1, x0:x1] = _blend_composite_numpy(
+                                        canvas[y0:y1, x0:x1],
+                                        clip_arr[:h_copy, :w_copy],
+                                        bm_str,
+                                    )
+                    except Exception as e:
+                        print(f"  ⚠️  clipping composite 失败: {e}")
+                    finally:
+                        for sibling, vis in clip_saved:
+                            try:
+                                sibling.visible = vis
+                            except Exception:
+                                pass
+                elif has_adjustment_clip and base_has_overlay:
+                    # 含调整层 + base 有 overlay effects：
+                    # psd-tools composite 对渐变/颜色叠加渲染有 bug，
+                    # 不能直接用 composite。
+                    # 策略：
+                    # 1. 用 render_layer_with_effects 渲染 base（保留渐变叠加）
+                    # 2. 手动合成像素 clip 层
+                    # 3. 调整层的影响通过 ratio-transfer 从 composite 提取并应用
+                    base_result = render_layer_with_effects(child)
+                    if base_result is not None:
+                        base_img, base_eff_bbox = base_result
+                        if base_img.mode != 'RGBA':
+                            base_img = base_img.convert('RGBA')
+                        base_arr = ImageArrayUtils.pil_to_float_array(base_img)
+                        base_arr[:, :, 3] *= (child.opacity / 255.0)
+                        base_alpha = base_arr[:, :, 3:4].copy()
+
+                        # 分离像素 clip 层和调整层
+                        pixel_clips = [cl for cl in clip_layers
+                                       if cl.kind in ('pixel', 'shape', 'smartobject', 'type', 'group')]
+                        adjust_clips = [cl for cl in clip_layers
+                                        if cl.kind not in ('pixel', 'shape', 'smartobject', 'type', 'group')]
+
+                        # 合成像素 clip 层
+                        for cl in pixel_clips:
+                            cl_result = render_layer_with_effects(cl)
+                            if cl_result is None:
+                                continue
+                            cl_img, cl_eff_bbox = cl_result
+                            if cl_img.mode != 'RGBA':
+                                cl_img = cl_img.convert('RGBA')
+                            cl_arr = ImageArrayUtils.pil_to_float_array(cl_img)
+                            cl_arr[:, :, 3] *= (cl.opacity / 255.0)
+                            cx = cl_eff_bbox[0] - base_eff_bbox[0]
+                            cy = cl_eff_bbox[1] - base_eff_bbox[1]
+                            cl_h, cl_w = cl_arr.shape[:2]
+                            base_h, base_w = base_arr.shape[:2]
+                            src_x0 = max(0, -cx)
+                            src_y0 = max(0, -cy)
+                            dst_x0 = max(0, cx)
+                            dst_y0 = max(0, cy)
+                            cp_w = min(cl_w - src_x0, base_w - dst_x0)
+                            cp_h = min(cl_h - src_y0, base_h - dst_y0)
+                            if cp_w > 0 and cp_h > 0:
+                                region = base_arr[dst_y0:dst_y0+cp_h, dst_x0:dst_x0+cp_w]
+                                cl_region = cl_arr[src_y0:src_y0+cp_h, src_x0:src_x0+cp_w]
+                                cl_bm = str(getattr(cl, 'blend_mode', 'NORMAL'))
+                                base_arr[dst_y0:dst_y0+cp_h, dst_x0:dst_x0+cp_w] = \
+                                    _blend_composite_numpy(region, cl_region, cl_bm)
+
+                        # 处理调整层的影响：通过 ratio-transfer
+                        # 获取 psd-tools composite 的"仅 base"和"base+调整层"结果，
+                        # 计算颜色比值并应用到我们的渐变结果上
+                        if adjust_clips:
+                            try:
+                                base_bbox_raw = child.bbox
+                                # 获取无调整层的 composite（仅 base）
+                                adj_saved = []
+                                for ac in adjust_clips:
+                                    if ac.visible:
+                                        adj_saved.append((ac, True))
+                                        ac.visible = False
+                                clip_set_for_adj = {id(child)} | {id(cl) for cl in pixel_clips}
+                                sibling_saved = []
+                                for sibling in group_layer:
+                                    if id(sibling) not in clip_set_for_adj and sibling.visible:
+                                        sibling_saved.append((sibling, True))
+                                        sibling.visible = False
+                                comp_base_only = group_layer.composite(viewport=base_bbox_raw)
+                                # 恢复调整层
+                                for ac, vis in adj_saved:
+                                    ac.visible = vis
+                                # 获取含调整层的 composite（base + adjustments）
+                                full_clip_set = {id(child)} | {id(cl) for cl in clip_layers}
+                                for sibling in group_layer:
+                                    if id(sibling) not in full_clip_set and sibling.visible:
+                                        # 可能已被上面隐藏
+                                        if (sibling, True) not in sibling_saved:
+                                            sibling_saved.append((sibling, True))
+                                            sibling.visible = False
+                                comp_with_adj = group_layer.composite(viewport=base_bbox_raw)
+                                # 恢复所有 sibling
+                                for sibling, vis in sibling_saved:
+                                    sibling.visible = vis
+
+                                if comp_base_only is not None and comp_with_adj is not None:
+                                    ref_arr = ImageArrayUtils.pil_to_float_array(
+                                        comp_base_only.convert('RGBA'))
+                                    adj_arr = ImageArrayUtils.pil_to_float_array(
+                                        comp_with_adj.convert('RGBA'))
+                                    # 计算调整层的颜色变换比值
+                                    # ratio = adj / ref (仅在 ref 有内容时)
+                                    ref_rgb = ref_arr[:, :, :3]
+                                    adj_rgb = adj_arr[:, :, :3]
+                                    safe_ref = np.maximum(ref_rgb, 1.0 / 255.0)
+                                    ratio = adj_rgb / safe_ref
+                                    # 限制比值范围，避免极端变换
+                                    ratio = np.clip(ratio, 0.0, 3.0)
+                                    # 只在 ref 有不透明像素的位置应用
+                                    ref_alpha = ref_arr[:, :, 3:4]
+                                    has_content = (ref_alpha > 0.01).astype(np.float32)
+                                    # 应用 ratio 到 base_arr 的对应区域
+                                    # base_arr 可能比 ref 更大（因为效果扩展）
+                                    off_x = base_bbox_raw[0] - base_eff_bbox[0]
+                                    off_y = base_bbox_raw[1] - base_eff_bbox[1]
+                                    ref_h, ref_w = ref_rgb.shape[:2]
+                                    base_h2, base_w2 = base_arr.shape[:2]
+                                    # 计算重叠
+                                    apply_x0 = max(0, off_x)
+                                    apply_y0 = max(0, off_y)
+                                    src_x0a = max(0, -off_x)
+                                    src_y0a = max(0, -off_y)
+                                    apply_w = min(ref_w - src_x0a, base_w2 - apply_x0)
+                                    apply_h = min(ref_h - src_y0a, base_h2 - apply_y0)
+                                    if apply_w > 0 and apply_h > 0:
+                                        region_rgb = base_arr[
+                                            apply_y0:apply_y0+apply_h,
+                                            apply_x0:apply_x0+apply_w, :3]
+                                        r = ratio[src_y0a:src_y0a+apply_h,
+                                                  src_x0a:src_x0a+apply_w]
+                                        mask = has_content[src_y0a:src_y0a+apply_h,
+                                                          src_x0a:src_x0a+apply_w]
+                                        # 仅在有内容处应用调整比值
+                                        adjusted = region_rgb * r
+                                        base_arr[
+                                            apply_y0:apply_y0+apply_h,
+                                            apply_x0:apply_x0+apply_w, :3
+                                        ] = np.clip(
+                                            region_rgb * (1.0 - mask) + adjusted * mask,
+                                            0.0, 1.0)
+                            except Exception as e:
+                                print(f"  ⚠️  调整层 ratio-transfer 失败: {e}")
+
+                        # 用 base 原始 alpha 裁剪
+                        base_arr[:, :, 3:4] = np.minimum(
+                            base_arr[:, :, 3:4], base_alpha
+                        )
+                        # 合成到 canvas
+                        layer_x = base_eff_bbox[0] - grp_bbox[0] + expand
+                        layer_y = base_eff_bbox[1] - grp_bbox[1] + expand
+                        layer_h, layer_w = base_arr.shape[:2]
+                        y0, y1 = layer_y, layer_y + layer_h
+                        x0, x1 = layer_x, layer_x + layer_w
+                        if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
+                            y1 = min(y1, ext_h)
+                            x1 = min(x1, ext_w)
+                            h_copy = y1 - y0
+                            w_copy = x1 - x0
+                            if h_copy > 0 and w_copy > 0:
+                                bm_str = str(getattr(child, 'blend_mode', 'NORMAL'))
+                                canvas[y0:y1, x0:x1] = _blend_composite_numpy(
+                                    canvas[y0:y1, x0:x1],
+                                    base_arr[:h_copy, :w_copy],
+                                    bm_str,
+                                )
+                else:
+                    # 纯像素 clipping 层：手动合成
+                    base_result = render_layer_with_effects(child)
+                    if base_result is not None:
+                        base_img, base_eff_bbox = base_result
+                        if base_img.mode != 'RGBA':
+                            base_img = base_img.convert('RGBA')
+                        base_arr = ImageArrayUtils.pil_to_float_array(base_img)
+                        base_arr[:, :, 3] *= (child.opacity / 255.0)
+                        base_alpha = base_arr[:, :, 3:4].copy()
+                        # 对每个 clipping 层，在 base 区域内合成
+                        for cl in clip_layers:
+                            cl_result = render_layer_with_effects(cl)
+                            if cl_result is None:
+                                continue
+                            cl_img, cl_eff_bbox = cl_result
+                            if cl_img.mode != 'RGBA':
+                                cl_img = cl_img.convert('RGBA')
+                            cl_arr = ImageArrayUtils.pil_to_float_array(cl_img)
+                            cl_arr[:, :, 3] *= (cl.opacity / 255.0)
+                            # 计算 clipping 层相对于 base 的偏移
+                            cx = cl_eff_bbox[0] - base_eff_bbox[0]
+                            cy = cl_eff_bbox[1] - base_eff_bbox[1]
+                            cl_h, cl_w = cl_arr.shape[:2]
+                            base_h, base_w = base_arr.shape[:2]
+                            # 计算重叠区域
+                            src_x0 = max(0, -cx)
+                            src_y0 = max(0, -cy)
+                            dst_x0 = max(0, cx)
+                            dst_y0 = max(0, cy)
+                            cp_w = min(cl_w - src_x0, base_w - dst_x0)
+                            cp_h = min(cl_h - src_y0, base_h - dst_y0)
+                            if cp_w > 0 and cp_h > 0:
+                                region = base_arr[dst_y0:dst_y0+cp_h, dst_x0:dst_x0+cp_w]
+                                cl_region = cl_arr[src_y0:src_y0+cp_h, src_x0:src_x0+cp_w]
+                                cl_bm = str(getattr(cl, 'blend_mode', 'NORMAL'))
+                                base_arr[dst_y0:dst_y0+cp_h, dst_x0:dst_x0+cp_w] = \
+                                    _blend_composite_numpy(region, cl_region, cl_bm)
+                        # 用 base 原始 alpha 裁剪（clipping 层不能超出 base 范围）
+                        base_arr[:, :, 3:4] = np.minimum(
+                            base_arr[:, :, 3:4], base_alpha
+                        )
+                        # 合成到 canvas
+                        layer_x = base_eff_bbox[0] - grp_bbox[0] + expand
+                        layer_y = base_eff_bbox[1] - grp_bbox[1] + expand
+                        layer_h, layer_w = base_arr.shape[:2]
+                        y0, y1 = layer_y, layer_y + layer_h
+                        x0, x1 = layer_x, layer_x + layer_w
+                        if 0 <= y0 < ext_h and 0 <= x0 < ext_w:
+                            y1 = min(y1, ext_h)
+                            x1 = min(x1, ext_w)
+                            h_copy = y1 - y0
+                            w_copy = x1 - x0
+                            if h_copy > 0 and w_copy > 0:
+                                bm_str = str(getattr(child, 'blend_mode', 'NORMAL'))
+                                canvas[y0:y1, x0:x1] = _blend_composite_numpy(
+                                    canvas[y0:y1, x0:x1],
+                                    base_arr[:h_copy, :w_copy],
+                                    bm_str,
+                                )
+            else:
+                # 无 clipping 层或是子组：正常渲染
+                render_layer(child)
+                # 跳过后续 clipping 层的独立渲染（已在上面处理）
+                # 注意：如果 base 是 group 且有 clip 层，clip 层仍独立渲染
+                # （psd-tools composite 子组时已含 clipping 处理）
+                for cl in clip_layers:
+                    render_layer(cl)
+            i = j
 
         return ImageArrayUtils.float_array_to_pil(canvas)
 
@@ -1601,8 +2144,12 @@ class LayerExporter:
                   f"({len(child_names)}层: {child_names})")
 
             expand = self._calc_group_expand(group_layer)
-            if expand > 0:
-                print(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染")
+            has_overlay_effects = self._group_has_overlay_effects(group_layer)
+            if expand > 0 or has_overlay_effects:
+                if expand > 0:
+                    print(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染")
+                else:
+                    print(f"{'  ' * depth}  🌟 检测到叠加效果(渐变/颜色叠加)，使用混合渲染")
                 # ── 双路径：hybrid（保留溢出效果） + 内部 composite 覆盖 ──
                 # hybrid 手动逐层 alpha_composite，无法处理剪贴蒙版关系
                 # （clip=True 图层独立 render_layer_with_effects 出来常常是
@@ -1614,7 +2161,11 @@ class LayerExporter:
                 composite_img = self._render_group_with_hybrid_strategy(
                     group_layer, grp_bbox, expand, depth,
                 )
-                if composite_img is not None:
+                if composite_img is not None and expand > 0:
+                    # 仅在有溢出效果时才用 composite 覆盖内部区域
+                    # （处理剪贴蒙版关系；外圈保留 hybrid 的溢出像素）
+                    # 当 expand==0 仅因 overlay 效果触发 hybrid 时不覆盖，
+                    # 因为 psd-tools 的 composite 对渐变叠加渲染有误。
                     try:
                         inner_img = group_layer.composite(viewport=grp_bbox)
                         if inner_img is not None:
@@ -1805,6 +2356,50 @@ class LayerExporter:
                 except Exception:
                     pass
 
+    def _is_fully_suppressed_group(self, layer: Any) -> bool:
+        """判断一个图层是否应从 cluster 合成中排除（光效穿透相关）。
+
+        检查规则（满足任一即排除）：
+        1. 该层本身在 _suppressed_light_layers 中（直接被抑制的叶层）
+        2. 该层在 _fallback_light_layers 中（降级为 CSS blend 的光效层，
+           在 cluster composite 中同样不应参与——否则黑底暴露）
+        3. 该层是 PASS_THROUGH 组，且所有可见子层（递归）要么已被抑制/降级，
+           要么是恒等色混合模式的光效层（COLOR_DODGE/SCREEN 等）。
+           这类组在孤立 composite 时会产生黑色底（恒等色混合模式在
+           透明/黑色背景上的 identity 特性：result = f(black, blend) → black）。
+        """
+        if id(layer) in self._suppressed_light_layers:
+            return True
+        # 降级光效层在 cluster 合成中也应被排除（它们的 COLOR_DODGE 模式
+        # 在 composite() 中仍会暴露黑底，虽然独立导出时会去黑底）
+        if id(layer) in self._fallback_light_layers:
+            return True
+        if not hasattr(layer, '__iter__'):
+            return False
+        # 非 PASS_THROUGH 组不适用此规则
+        bm = str(getattr(layer, 'blend_mode', '')).upper()
+        if 'PASS_THROUGH' not in bm:
+            return False
+        # 组层：所有可见子层都是被抑制/降级的或属于光效恒等色混合模式
+        visible_children = [c for c in layer if getattr(c, 'visible', True)]
+        if not visible_children:
+            return False
+        for child in visible_children:
+            if id(child) in self._suppressed_light_layers:
+                continue
+            if id(child) in self._fallback_light_layers:
+                continue
+            if self._is_fully_suppressed_group(child):
+                continue
+            # 叶层：检查是否为光效恒等色混合模式
+            child_bm = str(getattr(child, 'blend_mode', '')).upper()
+            child_bm_short = child_bm.split('.')[-1] if '.' in child_bm else child_bm
+            if child_bm_short in _LIGHT_BLEND_MODES:
+                continue
+            # 有非光效子层 → 不能整体排除
+            return False
+        return True
+
     def _merge_cluster_layers_as_image(
         self, group_layer: Any, cluster_members: list[Any],
         group_name: str, full_name: str,
@@ -1831,15 +2426,24 @@ class LayerExporter:
         # 收缩到 cluster 的视觉 union，但效果溢出会被裁。所以我们仍走
         # _merge_group_as_single_image 的统一逻辑：用整组 bbox + expand）。
 
-        # ── Phase 5 补充：从 cluster 中排除被抑制的光效层 ──
+        # ── Phase 5 补充：从 cluster 中排除被抑制/降级的光效层 ──
         # 被 _suppressed_light_layers 标记的光效层，其效果已通过 Phase 4
-        # 在外部目标层上合成。如果仍参与组内 composite()，黑色恒等色像素
-        # 会被烧进合成图（COLOR_DODGE/SCREEN 等模式下黑色 = 恒等色，
+        # 在外部目标层上合成。被 _fallback_light_layers 标记的降级光效层，
+        # 将独立导出（去黑底 + CSS blend）。两者如果仍参与组内 composite()，
+        # 黑色恒等色像素会被烧进合成图（COLOR_DODGE/SCREEN 等模式下黑色 = 恒等色，
         # 在 PSD 原生合成中"透明"但在 composite() 输出中暴露为真实黑底）。
         # 因此将其临时隐藏，不参与合成。
+        #
+        # 注意：_suppressed_light_layers / _fallback_light_layers 记录的是
+        # 光效**叶层**的 id()，但 cluster_members 可能包含这些叶层的
+        # PASS_THROUGH 父组。需要递归检查。
         suppressed_in_cluster: list[Any] = []
         for m in cluster_members:
             if id(m) in self._suppressed_light_layers:
+                suppressed_in_cluster.append(m)
+            elif id(m) in self._fallback_light_layers:
+                suppressed_in_cluster.append(m)
+            elif self._is_fully_suppressed_group(m):
                 suppressed_in_cluster.append(m)
 
         # 隐藏所有不在 cluster 内的 sibling（直接子）
@@ -1861,13 +2465,23 @@ class LayerExporter:
         if suppressed_in_cluster:
             suppressed_names = [m.name for m in suppressed_in_cluster]
             print(f"{'  ' * depth}🔦 cluster 内排除光效层: {suppressed_names} "
-                  f"(已穿透合成到外部目标层)")
+                  f"(已穿透合成/降级为CSS blend)")
+
+        # 如果 cluster 所有成员都被排除，不需要合成
+        effective_members = [m for m in cluster_members if id(m) not in suppressed_ids]
+        if not effective_members:
+            # 恢复 visibility 后返回 None
+            for c, vis in saved:
+                try:
+                    c.visible = vis
+                except Exception:
+                    pass
+            print(f"{'  ' * depth}🔦 cluster 全部成员已被光效穿透抑制，跳过合成")
+            return None
 
         try:
             mname = f"{group_name}{suffix}" if suffix else group_name
             mfull = f"{full_name}{suffix}" if suffix else full_name
-            # 更新日志中的层数（排除被抑制的光效层）
-            effective_members = [m for m in cluster_members if id(m) not in suppressed_ids]
             print(f"{'  ' * depth}🧬 合并 cluster: {mname} "
                   f"({len(effective_members)}层: {[m.name for m in effective_members]})")
             return self._merge_group_as_single_image(

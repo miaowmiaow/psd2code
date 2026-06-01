@@ -118,6 +118,21 @@ class GradientOverlayRenderer:
             angle_deg = float(desc.get(b'Angl', 90))
             reversed_grad = bool(desc.get(b'Rvrs', False))
             
+            # 解析缩放比例（PS 默认 100%）
+            scale_pct = float(desc.get(b'Scl ', 100))
+            grad_scale = scale_pct / 100.0
+            
+            # 解析"与图层对齐"标志（Align with Layer）
+            align_with_layer = bool(desc.get(b'Algn', True))
+            
+            # 解析偏移（Offset）- 百分比偏移
+            ofst = desc.get(b'Ofst')
+            offset_x_pct = 0.0
+            offset_y_pct = 0.0
+            if ofst is not None:
+                offset_x_pct = float(ofst.get(b'Hrzn', 0.0)) / 100.0
+                offset_y_pct = float(ofst.get(b'Vrtc', 0.0)) / 100.0
+            
             # 解析渐变类型（Linear / Radial / Angle / Reflected / Diamond）
             grad_type = desc.get(b'Type')
             grad_type_str = ''
@@ -169,17 +184,33 @@ class GradientOverlayRenderer:
                 # 线性渐变：沿角度方向
                 # PS 角度：90° = 从下到上，0° = 从左到右
                 # 方向向量：dx = cos(angle), dy = -sin(angle)（屏幕 y 轴向下）
-                dx = math.cos(angle_rad)
-                dy = -math.sin(angle_rad)
+                cos_a = math.cos(angle_rad)
+                sin_a = math.sin(angle_rad)
                 
-                # 创建坐标网格（归一化到 [0, 1]）
+                # 创建坐标网格
                 yy, xx = np.mgrid[0:h, 0:w]
-                # 中心点
-                cy, cx = h / 2.0, w / 2.0
-                # 投影到渐变方向
-                proj = (xx - cx) * dx + (yy - cy) * dy
-                # 归一化到 [0, 1]
-                max_proj = abs(dx) * w / 2.0 + abs(dy) * h / 2.0
+                # 中心点（考虑偏移）
+                cy = h / 2.0 + offset_y_pct * h
+                cx = w / 2.0 + offset_x_pct * w
+                
+                if align_with_layer:
+                    # 与图层对齐：在物理像素空间中投影，
+                    # 渐变的总跨度(SF)等于图层高度 × scale。
+                    # 这模拟了 Photoshop 的行为：
+                    # - 对正方形图层：渐变铺满整个图层
+                    # - 对窄长图层(如18×1864)+近水平渐变：渐变范围远大于宽度，
+                    #   使得窄方向上颜色变化极小（几乎均匀）
+                    # - 对宽扁图层(如1972×68)+垂直渐变：渐变范围=高度，
+                    #   使得整个高度上能看到完整的渐变色带
+                    proj = (xx - cx) * cos_a + (yy - cy) * (-sin_a)
+                    max_proj = (h / 2.0) * grad_scale
+                else:
+                    # 不与图层对齐：在物理像素空间中投影
+                    proj = (xx - cx) * cos_a + (yy - cy) * (-sin_a)
+                    # 使用对角线长度作为渐变的全范围
+                    half_diag = math.sqrt(w * w + h * h) / 2.0
+                    max_proj = half_diag * grad_scale
+                
                 if max_proj > 0:
                     t = (proj / max_proj + 1.0) / 2.0
                 else:
@@ -189,9 +220,16 @@ class GradientOverlayRenderer:
             elif 'Rdl' in grad_type_str:
                 # 径向渐变：从中心向外
                 yy, xx = np.mgrid[0:h, 0:w]
-                cy, cx = h / 2.0, w / 2.0
+                cy = h / 2.0 + offset_y_pct * h
+                cx = w / 2.0 + offset_x_pct * w
                 dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-                max_dist = math.sqrt(cx ** 2 + cy ** 2)
+                
+                if align_with_layer:
+                    # 与图层对齐：使用图层半对角线 * scale
+                    max_dist = (math.sqrt(w * w + h * h) / 2.0) * grad_scale
+                else:
+                    max_dist = math.sqrt(cx ** 2 + cy ** 2) * grad_scale
+                
                 t = (dist / max_dist).astype(np.float32) if max_dist > 0 else np.zeros((h, w), dtype=np.float32)
                 t = np.clip(t, 0.0, 1.0)
             
