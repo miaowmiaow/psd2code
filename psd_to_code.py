@@ -158,6 +158,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[psd2code] Done. Project: {project_root} (target output: {out_dir})")
     else:
         print(f"[psd2code] Done. Output: {out_dir}")
+
+    # 自动安装预览页（HTML 目标）：调用完整安装逻辑（复制 + cache-bust + index 内嵌）
+    try:
+        if out_dir and target_name == "html":
+            install_script = SCRIPTS_DIR / "preview" / "install_preview.py"
+            if install_script.exists():
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location("install_preview", install_script)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    mod.install(str(out_dir))
+                    print(f"[psd2code] Preview installed via {install_script}")
+            else:
+                print(f"[psd2code] Warning: preview installer not found: {install_script}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[psd2code] Warning: preview install failed: {exc}")
     return 0
 
 

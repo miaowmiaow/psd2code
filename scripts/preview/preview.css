@@ -1,0 +1,65 @@
+:root{--sidebar-width:320px;--accent:#0b5cff}
+*{box-sizing:border-box;font-family:Inter,Segoe UI,Helvetica,Arial,sans-serif}
+html,body,#app{height:100%;margin:0}
+#app{display:flex}
+#sidebar{width:var(--sidebar-width);padding:12px;background:#f7f8fb;border-right:1px solid #e6e9ef;overflow:auto}
+/* 隐藏侧栏，仅在 overlay 上交互（用户要求） */
+#sidebar{display:none}
+#sidebar h1{font-size:16px;margin:0 0 12px}
+#controls{font-size:13px;color:#333;margin-bottom:10px}
+#layer-list{font-size:13px}
+.layer-item{padding:6px;border-radius:4px;margin-bottom:6px;cursor:pointer;border:1px solid transparent}
+.layer-item:hover{background:#fff;border-color:#e1e6fb}
+.layer-name{font-weight:600}
+.layer-meta{color:#666;font-size:12px}
+#viewer{flex:1;display:flex;align-items:stretch;overflow:auto}
+#frame-wrap{position:relative;flex:1;background:#fff;display:flex;align-items:flex-start;justify-content:center;min-height:100%}
+#preview-frame{border:0;width:100%;height:100%;display:block}
+#overlay{position:absolute;left:0;top:0;pointer-events:auto}
+.layer-box{position:absolute;border:2px dashed var(--accent);background:rgba(11,92,255,0.03);pointer-events:auto}
+.layer-box{transition:opacity .12s ease, transform .12s ease}
+
+#overlay{z-index:9999}
+.layer-label{position:absolute;background:var(--accent);color:#fff;padding:2px 6px;border-radius:3px;font-size:12px}
+
+/* selected info box shown near selected element */
+.selected-info{position:absolute;background:rgba(0,0,0,0.85);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;z-index:10002;display:none}
+
+/* right info panel */
+#info-panel{width:320px;padding:12px;background:#fff;border-left:1px solid #e6e9ef;box-shadow:-4px 0 12px rgba(0,0,0,0.04);overflow:auto}
+/* 固定右侧详情面板，随页面浮动 */
+#info-panel{position:fixed;right:0;top:0;height:100vh;z-index:10003}
+#info-panel h2{font-size:14px;margin:0 0 8px}
+.info-list{font-size:13px}
+.info-item{padding:8px;border-radius:4px;margin-bottom:6px;cursor:pointer;border:1px solid transparent}
+.info-item:hover{background:#f7f9ff}
+.info-item.selected{background:#e8f0ff;border-color:#cfe0ff}
+.info-details{margin-top:12px;font-size:13px;color:#333}
+
+/* svg connector styles */
+.overlay-svg-wrap{}
+#overlay svg{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:10002}
+.connector{stroke:#ff5a7a;stroke-width:2.5;stroke-linecap:round;opacity:0.95}
+.connector-gap{fill:#ff5a7a;color:#fff;font-size:12px}
+
+/* blue dashed connector behind the pink solid connector */
+.connector-dashed{stroke:#70b6ff;stroke-width:1.8;stroke-linecap:round;stroke-dasharray:6 6;opacity:0.95}
+
+.layer-box{opacity:0;pointer-events:auto;z-index:10001}
+/* 默认隐藏标签与徽章，仅在 hover 时显示 */
+.layer-label, .size-badge, .side-badge{opacity:0;pointer-events:none}
+.layer-box.visible, .layer-box.visible .size-badge, .layer-box.visible .side-badge, .layer-box.visible + .layer-label,
+.layer-box.selected, .layer-box.selected .size-badge, .layer-box.selected .side-badge, .layer-box.selected + .layer-label,
+.layer-label.selected{opacity:1;pointer-events:auto}
+.size-badge{position:absolute;background:rgba(0,0,0,0.75);color:#fff;padding:2px 6px;border-radius:4px;font-size:12px;transform:translate(0,-100%);z-index:10000}
+.gap-label{position:absolute;background:#ff5a7a;color:#fff;padding:4px 8px;border-radius:8px;font-size:12px;pointer-events:none;transform:translate(-50%,-50%);box-shadow:0 4px 10px rgba(255,90,122,0.18),0 0 0 2px rgba(255,255,255,0.92);border:1px solid rgba(255,255,255,0.95);text-shadow:0 1px 1px rgba(0,0,0,0.22);z-index:10020}
+.gap-label.gap-h{background:#ff5a7a}
+.gap-label.gap-v{background:#ff5a7a}
+
+.layer-box.selected{border-color:#ff5a7a;box-shadow:0 0 0 3px rgba(255,90,122,0.08)}
+.layer-box.hover{border-color:#70b6ff;box-shadow:0 0 0 3px rgba(112,182,255,0.06)}
+/* side badges around box */
+.side-badge{position:absolute;background:#ff4da6;color:#fff;padding:4px 8px;border-radius:12px;font-size:12px;box-shadow:0 2px 6px rgba(0,0,0,0.15);z-index:10001}
+.side-badge.side-left,.side-badge.side-right{white-space:nowrap}
+.side-badge.side-top,.side-badge.side-bottom{white-space:nowrap}
+#info{margin-top:12px;font-size:12px;color:#222}

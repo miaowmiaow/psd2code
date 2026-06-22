@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PSD2Code 层检测预览</title>
+  <link rel="stylesheet" href="preview.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <h1>图层列表</h1>
+      <div id="controls">
+        <label><input id="toggle-outline" type="checkbox" checked /> 显示高亮框</label>
+        <label>缩放：<input id="scale" type="range" min="0.25" max="2" step="0.01" value="1"/></label>
+      </div>
+      <div id="layer-list"></div>
+      <div id="info"></div>
+    </aside>
+
+    <main id="viewer">
+      <div id="frame-wrap">
+        <iframe id="preview-frame"></iframe>
+        <div id="embedded-root"></div>
+        <div id="overlay"></div>
+      </div>
+    </main>
+    <aside id="info-panel">
+      <h2>图层信息</h2>
+      <div id="info-list" class="info-list"></div>
+      <div id="info-details" class="info-details"></div>
+    </aside>
+  </div>
+  <script src="preview.js?v=20260612r1"></script>
+</body>
+</html>
