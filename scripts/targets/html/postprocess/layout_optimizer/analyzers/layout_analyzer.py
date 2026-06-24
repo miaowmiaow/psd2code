@@ -150,6 +150,15 @@ class LayoutAnalyzer:
             # V8：互相重叠型装饰组（多个图层两两显著重叠）
             elif trend_ratio < 0.6 and self._is_stacked_cluster(content_list):
                 layout_type = 'none'
+            # V10-B：bg 剔除后 content 仍叠在 bg 上的叠加结构拦截
+            # 场景：rect（大背景）被识别为 bg 剔除后，content_list 只剩 candy + text
+            # 两者之间的 Δleft 被 V10 特例（2 元素 1 次变化就够）误判为 horizontal。
+            # 检查：若 bg 中存在任意元素与 content 中大多数元素显著重叠，
+            #        说明 content 是叠在 bg 上的，整组是叠加结构，不能 flex 化。
+            elif bg_set and self._content_stacked_on_bg(
+                bg_set, content_list, children_info_sorted
+            ):
+                layout_type = 'none'
 
         return {
             'layout_type': layout_type,
@@ -546,6 +555,54 @@ class LayoutAnalyzer:
             la, lb = max(1.0, a['height']), max(1.0, b['height'])
         ov = max(0.0, min(a2, b2) - max(a1, b1))
         return ov / max(la, lb)
+
+    def _content_stacked_on_bg(
+        self,
+        bg_set: Set[str],
+        content_list: List[dict],
+        all_children: List[dict],
+    ) -> bool:
+        """V10-B：检测 content 元素是否叠加在被剔除的 bg 元素上。
+
+        场景：bg 识别把大背景矩形（如 rect__112）剔除出 content_list，
+        导致 content_list 只剩 2 个元素（candy + text），V10 特例因此以
+        1 次变化就判定为 horizontal/vertical，将叠加结构误认为排列结构。
+
+        判定规则：
+          - 取 bg_set 中的每个 bg 元素
+          - 检查 content_list 中有多少个元素与该 bg 元素显著重叠
+            （content 元素的重叠面积 / content 元素自身面积 >= STACKED_ON_BG_RATIO）
+          - 若 ≥ STACKED_ON_BG_MIN_RATIO 比例的 content 元素叠在 bg 上
+            → 整组是叠加结构，不能 flex 化
+
+        为什么这个条件是安全的：
+          - 真正的文档流元素（flex-row/col）不会大面积叠在同一个背景层上，
+            它们有各自的独立位置
+          - 叠加结构（卡片内图标+文字叠在底图上）才会出现这种高重叠
+        """
+        if not content_list or not bg_set:
+            return False
+
+        # 构建 bg 元素的快速查找
+        bg_items = [c for c in all_children if c['class'] in bg_set]
+        if not bg_items:
+            return False
+
+        STACKED_ON_BG_RATIO = 0.5       # content 元素自身面积的 50% 叠在 bg 上才算"叠加"
+        STACKED_ON_BG_MIN_RATIO = 0.5   # content 中至少 50% 的元素满足叠加条件才拦截
+
+        for bg_item in bg_items:
+            stacked_count = 0
+            for c in content_list:
+                c_area = max(1.0, c['width'] * c['height'])
+                ov = self._bbox_overlap_area(c, bg_item)
+                if ov / c_area >= STACKED_ON_BG_RATIO:
+                    stacked_count += 1
+            stacked_ratio = stacked_count / len(content_list)
+            if stacked_ratio >= STACKED_ON_BG_MIN_RATIO:
+                return True
+
+        return False
 
     def _is_stacked_cluster(self, children_info_sorted: List[dict]) -> bool:
         """

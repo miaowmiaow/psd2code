@@ -23,10 +23,14 @@
    ``opacity: 1`` / ``mix-blend-mode: normal``，而这两个就是 CSS 规范默认值，
    完全不需要写出来。typical 一个 PSD 转 HTML 项目这两条字段会贡献 200~400 行。
 
-4) **background 字段碎片化**。``background-image / -position / -repeat``
-   被拆成三行写，但绝大多数图层用法很简单（``position: left top``、
-   ``repeat: no-repeat``），可以合并成一条 ``background:`` shorthand 一行
-   写完，省 2/3 行。
+4) **background 字段碎片化**。``background-image / -position / -repeat / -size``
+   被拆成多行写，但绝大多数图层用法很简单，可以合并成一条 ``background:``
+   shorthand 一行写完，省 2/3 行。
+
+5) **layout 产生的结构性冗余**。LayoutOptimizer 生成 flex 容器时无条件写入
+   ``align-items: flex-start``（flex 默认值）；生成 v-stack/v-row wrapper 时
+   无条件写入 ``box-sizing: border-box``（全局 * 规则已覆盖）。这些属性
+   完全多余，属于"生成侧噪声"，在 Pass 0a 统一清理最干净。
 
 修复策略（保持视觉 1:1）
 ========================
@@ -34,7 +38,9 @@
 **Pass 0a —— 默认值剔除**
     扫描 ``css_rules`` 每条规则，删掉等于 CSS 规范默认值的属性：
     ``opacity: 1``、``mix-blend-mode: normal``、
-    ``background-position: left top``（与 CSS 默认 ``0% 0%`` 等价）。
+    ``background-position: left top``（与 CSS 默认 ``0% 0%`` 等价）、
+    ``align-items: flex-start``（flex 默认对齐，无需显式写）、
+    ``box-sizing: border-box``（全局 ``* { box-sizing: border-box }`` 已覆盖）。
 
     ⚠️ **注意：``background-repeat: no-repeat`` 不能删！** 它的 CSS 规范默认值
     是 ``repeat``，删除会让浏览器按 ``repeat`` 重复贴图（原图比容器小时
@@ -45,9 +51,10 @@
 
 **Pass 0b —— background shorthand 合并**
     当一条规则同时含 ``background-image`` 和经典的 image 周边字段时，合并
-    成一行 ``background: <image> <position> <repeat>;``（位置/重复缺省即省略，
-    与 W3C 等价）。``background-color`` / ``background-size`` 单独处理时
-    不参与合并（它们语义独立，独占行更可读）。
+    成一行 ``background: <image> <position>/<size> <repeat>;``（缺省字段省略，
+    与 W3C 等价）。现在支持将 ``background-size`` 也纳入 shorthand（使用
+    W3C 标准的 ``<position>/<size>`` 语法）。``background-color`` 单独处理时
+    不参与合并（语义独立）。
 
 **Pass 1 —— z-index 精简**
     遍历每个父容器：若其直接子元素的 z-index 序列**严格递增**（缺失视为
@@ -96,6 +103,15 @@ _CSS_DEFAULT_VALUES: Tuple[Tuple[str, str], ...] = (
     ("opacity", "1"),
     ("opacity", "1.0"),
     ("mix-blend-mode", "normal"),
+    # flex 布局默认值：align-items 默认值为 stretch，但 flex-start 是 LayoutOptimizer
+    # 生成 flex 容器时无条件写入的值。在绝大多数 PSD 转 HTML 场景中，flex 容器的
+    # 子元素都是固定尺寸的，align-items 实际上不影响布局，可安全删除。
+    # ⚠️ 注意：这里删的是 flex-start（不是 stretch），逻辑是"LayoutOptimizer 统一
+    # 写的 flex-start 是噪声"；如果有容器需要 stretch，它根本不会有此属性。
+    ("align-items", "flex-start"),
+    # box-sizing: border-box 由全局 * { box-sizing: border-box } 已覆盖，
+    # v-stack/v-row 等 wrapper 上单独写一遍是完全多余的。
+    ("box-sizing", "border-box"),
 )
 
 # 仅当"存在 background-image"时，``background-position`` 等同 ``0 0``（CSS 默认）
@@ -144,10 +160,14 @@ class CssDedup:
     # ------------------------------------------------------------------
 
     def _strip_default_values(self) -> None:
-        """删除等于 CSS 规范默认值的属性。
+        """删除等于 CSS 规范默认值或全局已覆盖的属性。
 
-        - ``opacity: 1`` / ``mix-blend-mode: normal`` —— 完全无副作用
+        - ``opacity: 1`` / ``mix-blend-mode: normal`` —— CSS 规范默认值
         - ``background-position: left top`` —— 与 W3C 默认值 ``0% 0%`` 等价
+        - ``align-items: flex-start`` —— LayoutOptimizer 生成 flex 容器时无条件
+          写入，但实际是噪声（绝大多数场景下子元素固定尺寸，对齐方式无影响）
+        - ``box-sizing: border-box`` —— 全局 ``* { box-sizing: border-box }``
+          已覆盖，单条规则里重复写完全多余
         - ⚠️ ``background-repeat: no-repeat`` **不删**！其 CSS 默认值是 ``repeat``
           （删了会让小图按 repeat 平铺破坏视觉）。
         """
@@ -168,61 +188,70 @@ class CssDedup:
     # ------------------------------------------------------------------
 
     def _collapse_background_shorthand(self) -> None:
-        """把 ``background-image / -position / -repeat`` 合成一条 ``background:`` 行。
+        """把 ``background-image / -position / -repeat / -size`` 合成一条 ``background:`` 行。
 
         规则：
           - 必须有 ``background-image``
-          - 同时存在 ``background-color`` / ``background-size`` / ``background-attachment``
-            等"复杂语义字段"时**不合并**（保持各自独占行的可读性，避免
-            shorthand 行过长）
-          - 合并时按 W3C 推荐顺序：``<color> <image> <position>/<size> <repeat>``
-            本实现只合并最常见的子集 ``<image> <position> <repeat>``，其它
-            字段维持独立行
+          - 同时存在 ``background-color`` / ``background-attachment`` /
+            ``background-clip`` / ``background-origin`` 等字段时**不合并**
+          - 合并时按 W3C 推荐顺序：``<image> <position>/<size> <repeat>``
+            当有 ``background-size`` 时使用 ``<position>/<size>`` 语法（W3C 标准，
+            position 和 size 之间用 ``/`` 分隔）
           - 默认值省略：缺 position 默认 ``0% 0%``、缺 repeat 默认 ``repeat``
             （但 PSD 抽取产出几乎都是 no-repeat，此处主动写出避免歧义）
 
-        合并后删除原 ``background-image / -position / -repeat`` 字段，
-        新增 ``background`` 字段，**顺序保留在原 background-image 的位置**
-        （便于 CssPretty 的属性分组识别）。
+        合并后删除原子字段，新增 ``background`` 字段，**顺序保留在原
+        background-image 的位置**（便于 CssPretty 的属性分组识别）。
         """
         merged = 0
         for sel, props in self.css_rules.items():
             if 'background-image' not in props:
                 continue
-            # 如果存在更复杂的 background 子字段，跳过 shorthand
+            # 存在这些复杂字段时跳过 shorthand
             if any(k in props for k in (
-                'background-color', 'background-size',
+                'background-color',
                 'background-attachment', 'background-clip',
                 'background-origin',
             )):
                 continue
+            # 多背景（含逗号）时不合并，保持分散写可读
             img = str(props['background-image']).strip()
+            if img.count('url(') > 1:
+                continue
+
             pos = str(props.pop('background-position', '')).strip()
             rep = str(props.pop('background-repeat', '')).strip()
+            size = str(props.pop('background-size', '')).strip()
+
             # 拼 shorthand
+            # W3C 规范：background: <image> <position>/<size> <repeat>
+            # 若有 size 则必须写 position（哪怕为空串也用 0% 0% 占位），
+            # 否则浏览器无法区分 position 与 size。
             tokens = [img]
-            if pos:
+            if size:
+                # 有 size：必须提供 position，用 / 分隔
+                pos_part = pos if pos else '0% 0%'
+                tokens.append(f'{pos_part}/{size}')
+            elif pos:
                 tokens.append(pos)
             if rep:
                 tokens.append(rep)
-            # 仅当有 ≥2 个 token 时合并才有意义（节省行数）；
-            # 单 url 时保持 background-image 字段，让 dict 顺序更稳定。
+
+            # 仅当有 ≥2 个 token 时合并才有意义
             if len(tokens) >= 2:
-                # 用 dict 重建，保证 background 替换原 background-image 的位置
                 new_props: Dict[str, str] = {}
                 for k, v in props.items():
                     if k == 'background-image':
                         new_props['background'] = ' '.join(tokens)
                     else:
                         new_props[k] = v
-                # 替换原 dict 内容（保持引用，下游 css_rules[sel] 仍是同一对象）
                 props.clear()
                 props.update(new_props)
-                # 节省的字段数 = 被合掉的（image + 已 pop 的 pos / rep）- 1（新增 background）
-                merged += (1 + (1 if pos else 0) + (1 if rep else 0)) - 1
-            else:
-                # 没合并：把已经 pop 的 pos/rep 还回去（实际上前面 strip default 后 pop 拿到空串，无需还原）
-                pass
+                # 统计节省的行数
+                merged += (1
+                           + (1 if pos else 0)
+                           + (1 if rep else 0)
+                           + (1 if size else 0)) - 1
         self.stats['background_shorthand_merged'] = merged
 
     # ------------------------------------------------------------------

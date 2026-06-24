@@ -27,6 +27,7 @@ from .transformers.virtual_wrapper_rename import (
     VirtualWrapperRenameConfig,
 )
 from .transformers.wrapper_collapse import WrapperCollapse
+from .transformers.css_post_clean import CssPostClean, CssPostCleanConfig
 
 
 class LayoutOptimizer:
@@ -151,6 +152,9 @@ class LayoutOptimizer:
         self.virtual_wrapper_renamer = VirtualWrapperRename(
             self.soup, self.css_rules, self.stats, self.virtual_wrapper_rename_config
         )
+        self.css_post_clean = CssPostClean(
+            self.soup, self.css_rules, self.stats
+        )
 
     # ------------------------------------------------------------------
     # Internal: run a single transformer step with strict / tolerant mode
@@ -251,6 +255,15 @@ class LayoutOptimizer:
         # 同样旁路更新 ``stats['_class_alias_map']``。
         self._run_step("虚拟 wrapper 命名", self.virtual_wrapper_renamer.run)
 
+        # 步骤 3.9：结构感知 CSS 后处理清理（CssPostClean）
+        # 必须在所有改名/合并完成后（3.7/3.8 之后）、CssPretty 之前运行。
+        # 需要读 DOM 判断父子关系，清理 flex 子项上的无效三件套：
+        #   - position:relative（无偏移 + 无绝对定位子元素）
+        #   - z-index（PSD 全局导出序号，flex 布局下无叠序意义）
+        #   - flex-shrink:0（已有固定 width，不会被压缩）
+        # 以及清理 v-stack/v-row 等 wrapper 上的 z-index:0 噪声。
+        self._run_step("CSS 后处理清理", self.css_post_clean.run)
+
         # 步骤 4：CSS 美化（按 DOM 顺序排序 + 属性分段 + 合并组多行）
         # 失败时不阻断，调用方自动降级到 dict_to_css。
         # 注：流水线产生的"工艺标记属性"（data-virtual / data-bg-absorbed /
@@ -312,6 +325,13 @@ class LayoutOptimizer:
             print(
                 f"   - 虚拟 wrapper 命名: 重写 "
                 f"{self.stats['virtual_wrapper_renamed']} 个类名"
+            )
+        post_triple = self.stats.get('post_clean_flex_triple_removed', 0)
+        post_zero_z = self.stats.get('post_clean_zero_z_removed', 0)
+        if post_triple or post_zero_z:
+            print(
+                f"   - CSS 后处理清理: flex三件套 {post_triple} 属性, "
+                f"z-index:0 {post_zero_z} 条"
             )
         if pretty_css:
             print(f"   - CSS 美化: 已生成（DOM 序 + 属性分段 + 合并组多行）")

@@ -144,14 +144,33 @@ class TestCollapseBackgroundShorthand:
         assert "background" not in css[".a"]
         assert "background-image" in css[".a"]
 
-    def test_skip_when_background_size_exists(self):
+    def test_merge_with_background_size(self):
+        """background-size 现在也纳入 shorthand，使用 position/size 语法"""
         css = {".a": {
             "background-image": "url(img.png)",
             "background-size": "cover",
             "background-repeat": "no-repeat",
         }}
         _run_dedup("<div class='a'></div>", css)
-        assert "background" not in css[".a"]
+        # 有 size 时用 <position>/<size> 语法，position 缺省用 0% 0%
+        assert "background" in css[".a"]
+        assert "url(img.png)" in css[".a"]["background"]
+        assert "cover" in css[".a"]["background"]
+        assert "background-size" not in css[".a"]
+
+    def test_merge_with_background_size_and_position(self):
+        """background-size + position 时使用 <position>/<size> 语法"""
+        css = {".a": {
+            "background-image": "url(img.png)",
+            "background-size": "100px 50px",
+            "background-position": "center top",
+            "background-repeat": "no-repeat",
+        }}
+        _run_dedup("<div class='a'></div>", css)
+        assert "background" in css[".a"]
+        val = css[".a"]["background"]
+        assert "center top/100px 50px" in val
+        assert "no-repeat" in val
 
     def test_merge_without_position(self):
         """没有 background-position 时也能合并（只有 image + repeat）"""

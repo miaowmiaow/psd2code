@@ -204,6 +204,15 @@ def _absorb_in_container_v2(
         
         if _has_child_elements(child):
             continue
+
+        # 检查背景层是否溢出容器（left < 0 或 top < 0）
+        # 若背景层刻意设置负偏移，说明设计师希望背景图超出容器边界显示（出血效果）。
+        # 把这种层吸收为 background-image 后，background-position 的负值会导致
+        # 图片被容器的 overflow 裁切，无法还原原始视觉。因此直接跳过不吸收。
+        child_left = _parse_position_value(child_css.get("left", "0"))
+        child_top  = _parse_position_value(child_css.get("top", "0"))
+        if child_left < 0 or child_top < 0:
+            continue  # 溢出容器，不吸收
         
         # 新增：检查覆盖率（防止吸收只占容器一小部分的前景元素）
         child_width = _parse_dimension(child_css.get("width", "0"))
@@ -281,15 +290,40 @@ def _perform_absorption(
     
     # 如果有定位偏移，则累加到 background-position
     if bg_pos_x != 0 or bg_pos_y != 0:
-        # 解析现有的 background-position（如果有）
-        existing_pos = css_rules[container_css_selector].get("background-position", "0 0")
-        existing_x, existing_y = _parse_background_position(existing_pos)
-        
+        container_rule = css_rules[container_css_selector]
+
+        # 解析现有的 background-position：
+        #   优先从单独的 background-position 子属性读取；
+        #   若不存在，再尝试从 background shorthand 中提取（仅取 position 部分）。
+        existing_pos = container_rule.get("background-position", "")
+        if not existing_pos and "background" in container_rule:
+            existing_pos = _extract_position_from_shorthand(
+                container_rule["background"]
+            )
+        existing_x, existing_y = _parse_background_position(existing_pos or "0 0")
+
         # 累加新的偏移
         new_x = existing_x + bg_pos_x
         new_y = existing_y + bg_pos_y
-        
-        css_rules[container_css_selector]["background-position"] = f"{new_x}px {new_y}px"
+        pos_str = f"{new_x}px {new_y}px"
+
+        # ⚠️ 关键：若容器已有 background shorthand，必须把 position 嵌入
+        # shorthand 本身（W3C 语法：<image> <position> <repeat>），而不能
+        # 单独写一行 background-position。
+        # 原因：CSS 规范规定 background shorthand 会重置所有子属性（包括
+        # background-position）。若 shorthand 写在前、background-position 写在后，
+        # 顺序决定生效与否；若顺序相反则 shorthand 覆盖 background-position。
+        # 两种情况都容易出错，唯一安全的做法是把 position 内嵌进 shorthand。
+        if "background" in container_rule and "background-image" not in container_rule:
+            # 容器只有 shorthand 形式（无单独子属性），把 position 嵌入 shorthand
+            container_rule["background"] = _inject_position_into_shorthand(
+                container_rule["background"], pos_str
+            )
+            # 删除可能残留的单独 background-position（避免冲突）
+            container_rule.pop("background-position", None)
+        else:
+            # 容器使用分散子属性形式，直接写 background-position
+            container_rule["background-position"] = pos_str
     
     # 从 HTML 中删除背景层元素
     if bg_elem.parent:
@@ -496,6 +530,76 @@ def _parse_background_position(pos_str: str) -> tuple[int, int]:
     x = _parse_position_value(parts[0])
     y = _parse_position_value(parts[1])
     return (x, y)
+
+
+def _extract_position_from_shorthand(shorthand: str) -> str:
+    """从 background shorthand 中提取 position 部分（如果有）。
+
+    background shorthand 格式（W3C 简化版，psd2code 实际产物）：
+      ``url(...) <position> <repeat>``  或  ``url(...) <repeat>``
+
+    本函数尝试识别 position token（数字 + px / 关键字 center/left/right/top/bottom）。
+    若无法解析，返回空字符串（由调用方 fallback 到 "0 0"）。
+    """
+    if not shorthand:
+        return ""
+    # 移除 url(...) 部分
+    cleaned = re.sub(r'url\([^)]*\)', '', shorthand).strip()
+    # 已知的 repeat/attachment/clip/origin 关键字
+    _repeat_kw = {'no-repeat', 'repeat', 'repeat-x', 'repeat-y', 'space', 'round',
+                  'scroll', 'fixed', 'local', 'border-box', 'padding-box', 'content-box'}
+    _pos_kw = {'left', 'right', 'top', 'bottom', 'center'}
+    parts = cleaned.split()
+    pos_tokens = []
+    for token in parts:
+        t = token.lower()
+        if t in _repeat_kw:
+            continue  # 跳过非 position token
+        # 像素值或百分比
+        if re.match(r'^-?\d+(?:\.\d+)?(?:px|%|em|rem)?$', t):
+            pos_tokens.append(token)
+        elif t in _pos_kw:
+            pos_tokens.append(token)
+    if len(pos_tokens) >= 2:
+        return f"{pos_tokens[0]} {pos_tokens[1]}"
+    if len(pos_tokens) == 1:
+        return pos_tokens[0]
+    return ""
+
+
+def _inject_position_into_shorthand(shorthand: str, pos_str: str) -> str:
+    """将 position 值注入 background shorthand，替换原有 position 部分（如有）。
+
+    输入：
+      shorthand = 'url("foo.png") no-repeat'
+      pos_str   = '-10px -10px'
+    输出：
+      'url("foo.png") -10px -10px no-repeat'
+
+    策略：先剥离 url(...) 和已知 repeat 关键字，拼接新 position，再重组。
+    """
+    if not shorthand:
+        return shorthand
+    # 提取 url 部分
+    url_match = re.search(r'url\([^)]*\)', shorthand)
+    url_part = url_match.group(0) if url_match else ""
+    # 移除 url(...) 后剩余 token
+    rest = re.sub(r'url\([^)]*\)', '', shorthand).strip()
+    _repeat_kw = {'no-repeat', 'repeat', 'repeat-x', 'repeat-y', 'space', 'round',
+                  'scroll', 'fixed', 'local', 'border-box', 'padding-box', 'content-box'}
+    _pos_kw = {'left', 'right', 'top', 'bottom', 'center'}
+    keep_tokens = []   # repeat / attachment 等非 position token
+    for token in rest.split():
+        t = token.lower()
+        if t in _repeat_kw:
+            keep_tokens.append(token)
+        elif re.match(r'^-?\d+(?:\.\d+)?(?:px|%|em|rem)?$', t):
+            pass  # 旧的 position 值，丢弃（用 pos_str 替换）
+        elif t in _pos_kw:
+            pass  # 旧的 position 关键字，丢弃
+    # 重组：url position repeat/attachment...
+    parts = [p for p in [url_part, pos_str] + keep_tokens if p]
+    return ' '.join(parts)
 
 
 def _cleanup_unused_css_rules(
