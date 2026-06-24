@@ -147,6 +147,12 @@ class DOMRestructure(
                 for leaf in absorbed_leaves:
                     leaf.element.extract()
                     self.css_rules.pop(leaf.css_class, None)
+                    
+                    # 删除孤立的全局 class 规则
+                    # 当某个具体类（如 .img__50）被删除时，需要检查是否有相关的全局类
+                    # （如 .img）需要被一起删除，以防止 BackgroundLayerAbsorptionStage
+                    # 后续错误地识别和吸收孤立元素
+                    self._cleanup_orphaned_class_rules(leaf.css_class)
 
             if (len(tree.children) == 1 and
                     tree.children[0].kind in ('row', 'col')):
@@ -434,3 +440,43 @@ class DOMRestructure(
     def _next_virtual_id(self, kind: str) -> str:
         self._virtual_seq += 1
         return f"v-{kind}-{self._virtual_seq}"
+    
+    def _cleanup_orphaned_class_rules(self, deleted_css_class: str) -> None:
+        """删除孤立的全局 class 规则。
+        
+        当删除一个具体的 class（如 .img__50）时，检查是否有相关的更短全局类
+        （如 .img）没有对应的 HTML 元素在使用。如果是孤立的，也要一起删除，
+        以防止后续 BackgroundLayerAbsorptionStage 错误地识别和吸收孤立元素。
+        
+        例如：
+        - 删除 .img__50 时，检查 .img 是否还被其他元素使用
+        - 如果 .img 没有对应的 HTML 元素，则删除 .img 规则
+        """
+        if not deleted_css_class.startswith('.'):
+            return
+        
+        # 提取基础 class 名（去掉 __suffix）
+        class_name = deleted_css_class[1:]  # 去掉 '.'
+        
+        # 查找潜在的全局类（例如从 .img__50 → .img）
+        if '__' not in class_name:
+            return  # 已经是最短形式，无法进一步简化
+        
+        base_class = class_name.split('__')[0]  # 取第一个 __ 前的部分
+        global_selector = f'.{base_class}'
+        
+        # 检查是否存在全局类规则
+        if global_selector not in self.css_rules:
+            return
+        
+        # 检查 HTML 中是否还有元素使用这个全局类
+        global_class_used = False
+        for elem in self.soup.find_all(class_=True):
+            classes = elem.get('class', [])
+            if base_class in classes:
+                global_class_used = True
+                break
+        
+        # 如果全局类没有被任何元素使用，则删除该 CSS 规则
+        if not global_class_used:
+            self.css_rules.pop(global_selector, None)

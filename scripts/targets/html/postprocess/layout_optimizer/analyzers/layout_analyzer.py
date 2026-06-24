@@ -90,11 +90,13 @@ class LayoutAnalyzer:
                 'class': class_name,
                 'classes': list(child.get('class', [])),  # 全部 class（用于
                 # 识别 v-stack 等 wrapper 标记，避免 flex 化时误删 position）
+                'element': child,
                 'left': left,
                 'top': top,
                 'width': width,
                 'height': height,
                 'data_type': data_type,
+                'has_bg_image': self._has_bg_image(css),
                 'opacity': self._parse_opacity(css.get('opacity', '1')),
                 'is_trend': False  # 初始化为非趋势元素
             })
@@ -165,6 +167,14 @@ class LayoutAnalyzer:
         except (ValueError, TypeError):
             return 1.0
 
+    @staticmethod
+    def _has_bg_image(css: Dict[str, str]) -> bool:
+        """当前节点是否声明了可见背景图。"""
+        bg = str(css.get('background-image', '') or '').strip().lower()
+        if not bg or bg == 'none':
+            return False
+        return 'url(' in bg
+
     # ------------------------------------------------------------------
     # V13 (2026-04-30) trend 算法（在 V7 基础上增加投影对齐门槛）
     # ------------------------------------------------------------------
@@ -174,6 +184,16 @@ class LayoutAnalyzer:
     # 否则只是"Y 上下错开但 X 错位"的散落元素，不构成真正的"竖排列"。
     # 反之亦然。
     TREND_AXIS_OVERLAP_RATIO: float = 0.5
+
+    # R02: 居中容忍（像素）。当交叉轴投影重叠不足时，若中心线接近，
+    # 仍可视为同一条文档流链路。
+    CENTER_ALIGN_TOLERANCE_PX: float = 56.0
+
+    # R03: 间距一致性（变异系数上限）。用于判定等间距/近等间距序列。
+    GAP_CONSISTENCY_CV_MAX: float = 0.35
+
+    # R28: 文档流优先时，允许的两两最大重叠（按较小元素面积归一化）。
+    DOC_FLOW_MAX_PAIR_OVERLAP_RATIO: float = 0.08
 
     def _detect_trend_layout(
         self,
@@ -217,8 +237,8 @@ class LayoutAnalyzer:
             if last_vertical_trend_idx is not None:
                 prev = content_list[last_vertical_trend_idx]
                 expected_top = prev['top'] + prev['height']
-                if curr['top'] >= expected_top and \
-                        self._axis_overlap_ratio(prev, curr, axis='x') >= ratio:
+                if curr['top'] >= expected_top and self._is_axis_aligned(
+                        prev, curr, axis='x', ratio=ratio):
                     vertical_changes += 1
                     curr['is_trend'] = True
                     last_vertical_trend_idx = idx
@@ -226,8 +246,8 @@ class LayoutAnalyzer:
             if last_horizontal_trend_idx is not None:
                 prev = content_list[last_horizontal_trend_idx]
                 expected_left = prev['left'] + prev['width']
-                if curr['left'] >= expected_left and \
-                        self._axis_overlap_ratio(prev, curr, axis='y') >= ratio:
+                if curr['left'] >= expected_left and self._is_axis_aligned(
+                        prev, curr, axis='y', ratio=ratio):
                     horizontal_changes += 1
                     curr['is_trend'] = True
                     last_horizontal_trend_idx = idx
@@ -245,7 +265,162 @@ class LayoutAnalyzer:
             elif horizontal_changes >= 1 and horizontal_changes > vertical_changes:
                 layout_type = 'horizontal'
 
+        # R28: 文档流优先（无显著重叠 + 轴向对齐 + 间距相对一致）
+        # 仅在原趋势判定失败时兜底，避免放大历史误判面。
+        if layout_type == 'none':
+            flow_layout = self._detect_doc_flow_priority_layout(content_list)
+            if flow_layout in ('vertical', 'horizontal'):
+                layout_type = flow_layout
+                if flow_layout == 'vertical':
+                    vertical_changes = max(vertical_changes, max(1, len(content_list) - 1))
+                else:
+                    horizontal_changes = max(horizontal_changes, max(1, len(content_list) - 1))
+                for c in content_list:
+                    c['is_trend'] = True
+
         return layout_type, vertical_changes, horizontal_changes
+
+    def _is_axis_aligned(
+        self,
+        prev: dict,
+        curr: dict,
+        axis: str,
+        ratio: float,
+    ) -> bool:
+        """判断两元素在交叉轴是否可视为同一链。
+
+        R02 强化：
+        - 优先使用投影重叠率（历史规则）
+        - 若重叠不足，但中心线偏差在容忍内，也视为对齐
+        """
+        if self._axis_overlap_ratio(prev, curr, axis=axis) >= ratio:
+            return True
+        return self._axis_center_delta(prev, curr, axis=axis) <= self.CENTER_ALIGN_TOLERANCE_PX
+
+    @staticmethod
+    def _axis_center_delta(a: dict, b: dict, axis: str) -> float:
+        """返回两元素在指定轴上的中心点偏差绝对值。"""
+        if axis == 'x':
+            ca = a['left'] + a['width'] / 2.0
+            cb = b['left'] + b['width'] / 2.0
+        else:
+            ca = a['top'] + a['height'] / 2.0
+            cb = b['top'] + b['height'] / 2.0
+        return abs(ca - cb)
+
+    def _detect_doc_flow_priority_layout(self, content_list: List[dict]) -> str:
+        """R28 文档流优先兜底判定。
+
+        目标：识别"无重叠、单向排列、轴向对齐、间距相对一致"的容器，
+        允许其进入 flex 文档流。
+        """
+        n = len(content_list)
+        if n < 2:
+            return 'none'
+
+        if self._has_heavy_pair_overlap(
+            content_list,
+            threshold=self.DOC_FLOW_MAX_PAIR_OVERLAP_RATIO,
+        ):
+            return 'none'
+
+        vertical_ok = self._is_doc_flow_candidate(content_list, direction='vertical')
+        horizontal_ok = self._is_doc_flow_candidate(content_list, direction='horizontal')
+
+        if vertical_ok and not horizontal_ok:
+            return 'vertical'
+        if horizontal_ok and not vertical_ok:
+            return 'horizontal'
+        return 'none'
+
+    def _is_doc_flow_candidate(self, items: List[dict], direction: str) -> bool:
+        """判断给定方向是否满足 R28 文档流条件。"""
+        n = len(items)
+        if n < 2:
+            return False
+
+        if direction == 'vertical':
+            ordered = sorted(items, key=lambda x: (x['top'], x['left']))
+            main_gaps = self._compute_main_gaps(ordered, direction='vertical')
+            cross_deltas = [
+                self._axis_center_delta(ordered[i - 1], ordered[i], axis='x')
+                for i in range(1, n)
+            ]
+            avg_cross_size = max(
+                1.0,
+                sum(max(c['width'], 1.0) for c in ordered) / n,
+            )
+        else:
+            ordered = sorted(items, key=lambda x: (x['left'], x['top']))
+            main_gaps = self._compute_main_gaps(ordered, direction='horizontal')
+            cross_deltas = [
+                self._axis_center_delta(ordered[i - 1], ordered[i], axis='y')
+                for i in range(1, n)
+            ]
+            avg_cross_size = max(
+                1.0,
+                sum(max(c['height'], 1.0) for c in ordered) / n,
+            )
+
+        if any(g < 0 for g in main_gaps):
+            return False
+
+        # R02：交叉轴中心对齐容忍（按元素尺度自适应）
+        max_center_delta = max(cross_deltas) if cross_deltas else 0.0
+        center_tolerance = max(self.CENTER_ALIGN_TOLERANCE_PX, avg_cross_size * 0.6)
+        if max_center_delta > center_tolerance:
+            return False
+
+        # R03：间距一致性（n>=3 更有意义）
+        if len(main_gaps) >= 2:
+            cv = self._coefficient_of_variation(main_gaps)
+            if cv > self.GAP_CONSISTENCY_CV_MAX:
+                return False
+
+        return True
+
+    @staticmethod
+    def _compute_main_gaps(ordered: List[dict], direction: str) -> List[float]:
+        """计算主轴相邻元素间距。"""
+        gaps: List[float] = []
+        for i in range(1, len(ordered)):
+            prev = ordered[i - 1]
+            curr = ordered[i]
+            if direction == 'vertical':
+                gaps.append(curr['top'] - (prev['top'] + prev['height']))
+            else:
+                gaps.append(curr['left'] - (prev['left'] + prev['width']))
+        return gaps
+
+    @staticmethod
+    def _coefficient_of_variation(values: List[float]) -> float:
+        """变异系数 CV = std / mean；mean<=0 时返回 +inf。"""
+        if not values:
+            return 0.0
+        mean = sum(values) / len(values)
+        if mean <= 0:
+            return float('inf')
+        var = sum((v - mean) ** 2 for v in values) / len(values)
+        std = var ** 0.5
+        return std / mean
+
+    def _has_heavy_pair_overlap(
+        self,
+        items: List[dict],
+        threshold: float,
+    ) -> bool:
+        """是否存在显著重叠的元素对。"""
+        n = len(items)
+        for i in range(n):
+            a = items[i]
+            area_a = max(1.0, a['width'] * a['height'])
+            for j in range(i + 1, n):
+                b = items[j]
+                area_b = max(1.0, b['width'] * b['height'])
+                ov = self._bbox_overlap_area(a, b)
+                if ov / min(area_a, area_b) > threshold:
+                    return True
+        return False
 
     def _classify_children(
         self,
@@ -285,7 +460,10 @@ class LayoutAnalyzer:
 
         # 第一遍：识别 bg
         for c in children_info_sorted:
-            if c['data_type'] != 'image':
+            # 主路径：image 子
+            # 补充路径：group 但带背景图（常见于 root 下的大底框容器）
+            is_bg_like = (c['data_type'] == 'image') or bool(c.get('has_bg_image'))
+            if not is_bg_like:
                 continue
             if c['opacity'] < self.BG_OPACITY_MIN:
                 continue

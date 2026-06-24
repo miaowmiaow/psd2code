@@ -405,3 +405,83 @@ class TestApplyFlexLayoutsSkip:
         assert css[".bg-img"]["position"] == "absolute"
         # child-a / child-b 参与 flex 化
         assert "position" not in css[".child-a"]
+
+    def test_id_only_container_can_be_flexified(self):
+        """无 class、仅 id 的容器（如 #canvas）也应参与 FlexApplier。"""
+        html = """
+        <div id="canvas">
+          <div class="a"></div>
+          <div class="b"></div>
+          <div class="c"></div>
+        </div>
+        """
+        css = {
+            "#canvas": {"position": "relative", "width": "750px", "height": "3000px"},
+            ".a": {"position": "absolute", "left": "10px", "top": "0px", "width": "100px", "height": "20px"},
+            ".b": {"position": "absolute", "left": "10px", "top": "40px", "width": "100px", "height": "20px"},
+            ".c": {"position": "absolute", "left": "10px", "top": "80px", "width": "100px", "height": "20px"},
+        }
+        applier, soup, stats = _make_applier(html, css)
+        applier.apply_flex_layouts()
+
+        assert css["#canvas"].get("display") == "flex"
+        assert css["#canvas"].get("flex-direction") == "column"
+        assert stats["flex_applied"] >= 1
+
+    def test_canvas_trend_children_reordered_by_geometry(self):
+        """#canvas 在 flex 化时，趋势子节点应按几何顺序重排，避免 margin 基准错位。"""
+        html = """
+        <div id="canvas">
+          <div class="a"></div>
+          <div class="b"></div>
+          <div class="c"></div>
+        </div>
+        """
+        # DOM 顺序: a -> b -> c
+        # 几何顺序(top): b(50) -> a(80) -> c(100)
+        css = {
+            "#canvas": {"position": "relative", "width": "750px", "height": "3000px"},
+            ".a": {"position": "absolute", "left": "10px", "top": "80px", "width": "100px", "height": "20px"},
+            ".b": {"position": "absolute", "left": "10px", "top": "50px", "width": "100px", "height": "20px"},
+            ".c": {"position": "absolute", "left": "10px", "top": "100px", "width": "100px", "height": "20px"},
+        }
+        applier, soup, stats = _make_applier(html, css)
+        applier.apply_flex_layouts()
+
+        canvas = soup.find("div", id="canvas")
+        classes = [n.get("class", [None])[0] for n in canvas.find_all(recursive=False)]
+        assert classes == ["b", "a", "c"]
+
+    def test_root_reorder_keeps_non_trend_relative_order(self):
+        """根容器重排时，仅趋势节点换序，非趋势节点相对顺序保持不变。"""
+        html = """
+        <div id="canvas">
+          <div class="decor-1"></div>
+          <div class="a"></div>
+          <div class="decor-2"></div>
+          <div class="b"></div>
+          <div class="c"></div>
+        </div>
+        """
+        # 几何顺序(top): b(50) -> a(80) -> c(100)
+        css = {
+            "#canvas": {"position": "relative", "width": "750px", "height": "3000px"},
+            ".decor-1": {"position": "absolute", "left": "0px", "top": "0px", "width": "10px", "height": "10px"},
+            ".a": {"position": "absolute", "left": "10px", "top": "80px", "width": "100px", "height": "20px"},
+            ".decor-2": {"position": "absolute", "left": "0px", "top": "10px", "width": "10px", "height": "10px"},
+            ".b": {"position": "absolute", "left": "10px", "top": "50px", "width": "100px", "height": "20px"},
+            ".c": {"position": "absolute", "left": "10px", "top": "100px", "width": "100px", "height": "20px"},
+        }
+        applier, soup, stats = _make_applier(html, css)
+
+        # 直接调重排逻辑：模拟 trend 链是 b/a/c
+        canvas = soup.find("div", id="canvas")
+        trend_children = [
+            {"class": "b", "element": canvas.find("div", class_="b")},
+            {"class": "a", "element": canvas.find("div", class_="a")},
+            {"class": "c", "element": canvas.find("div", class_="c")},
+        ]
+        applier._reorder_trend_children_for_flow(canvas, trend_children)
+
+        classes = [n.get("class", [None])[0] for n in canvas.find_all(recursive=False)]
+        assert classes == ["decor-1", "b", "decor-2", "a", "c"]

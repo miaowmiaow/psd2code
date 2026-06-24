@@ -346,16 +346,23 @@ class CssDedup:
                 continue
 
             # 全部子带 z 且 DOM 顺序严格递增 → 删全部 z-index
-            # 例外：v-* 虚拟 wrapper（v-list / v-stack / v-row / v-col）
+            # 例外 1：v-* 虚拟 wrapper（v-list / v-stack / v-row / v-col）
             # 是 LayoutOptimizer 把原本散布在多个 z 层级的兄弟聚合到单一
             # DOM 位置形成的，它们的 z-index 是聚合后的整体叠序锚点，
             # 删除会让 wrapper 被同容器内带数字 z 的其它兄弟（或后续被
             # 删 z 的兄弟）的 DOM 顺序覆盖，造成整块视觉消失。
             # 因此 v-* wrapper 的 z-index 必须保留。
+            # 例外 2：有数字后缀的类（如 .candy__40、.text__126）可能是重复类的
+            # 一部分，后续 RepeatClassUnifier 会把它们合并。这些类之间的
+            # z-index 差异用来确定合并后的相对叠序，不能删除。
             for sel, _ in seq:
                 if sel is None:
                     continue
                 if self._is_virtual_wrapper_selector(sel):
+                    continue
+                # ✅ 修复：不删除有数字后缀的类的 z-index
+                if sel and '__' in sel and sel.split('__')[-1].isdigit():
+                    # 这是个重复类 (.base__N 形式)，可能被后续合并，保留 z-index
                     continue
                 rule = self.css_rules.get(sel)
                 if rule and 'z-index' in rule:
@@ -459,13 +466,17 @@ class CssDedup:
 
         - 仅 ``parse_css_to_dict`` 已识别的 .xxx / #xxx 规则参与（``css_rules`` 的 key 已经过滤）
         - 同组内 selector 按字母排序，便于稳定输出
+        - ✅ z-index 现在参与签名比较：防止不同 z-index 的规则被错误合并
+          （例如 .img__50 z=50 / .img__44 z=44 不应被识别为"等价"而合并）
         """
-        # 签名 = 排序后的 (key, value) 元组
+        # 签名 = 排序后的 (key, value) 元组，包括 z-index
         sig_to_selectors: Dict[Tuple[Tuple[str, str], ...], List[str]] = defaultdict(list)
         for sel, props in self.css_rules.items():
             if not props:
                 continue
-            sig = tuple(sorted(props.items()))
+            # ✅ 修复：包含 z-index 在签名比较中，不同 z-index = 不等价
+            sig_items = [(k, v) for k, v in props.items()]  # 不排除 z-index
+            sig = tuple(sorted(sig_items))
             sig_to_selectors[sig].append(sel)
 
         groups: List[List[str]] = []

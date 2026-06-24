@@ -202,7 +202,24 @@ class RepeatClassUnifier:
             elements_changed = self._rewrite_html_classes(set(m[1:] for m in members), unified_sel[1:])
 
             # 2) 改写 CSS：取首成员属性，新增 unified；删除原成员
-            self.css_rules[unified_sel] = dict(self.css_rules[members[0]])
+            # ✅ 修复：检查成员间是否有不同的 z-index，若有则保留最小值
+            unified_props = dict(self.css_rules[members[0]])
+            z_values = []
+            for sel in members:
+                z_str = self.css_rules[sel].get('z-index')
+                if z_str is not None:
+                    try:
+                        z_values.append(int(float(z_str)))
+                    except (ValueError, TypeError):
+                        pass
+            
+            # ⚠️ 如果成员间有不同的 z-index，保留最小值（最保守策略）
+            # 这样可以防止高z-index的元素被压在下方
+            if z_values and len(set(z_values)) > 1:
+                # 成员 z-index 不一致，保留最小值
+                unified_props['z-index'] = str(min(z_values))
+            
+            self.css_rules[unified_sel] = unified_props
             for sel in members:
                 self.css_rules.pop(sel, None)
 

@@ -132,6 +132,13 @@ class BackgroundMixin:
     def _absorb_normal_backgrounds(self, group, tree: 'LayoutNode') -> List[LeafInfo]:
         """识别 stack tree 中"可吸收"的背景 leaf，并将其合并为 group 的 CSS background。"""
         candidates: List[Tuple[LeafInfo, Dict[str, str]]] = []
+        
+        container_bbox = self._container_css_bbox(group, fallback=tree.bbox)
+        cw = container_bbox.width
+        ch = container_bbox.height
+        cover_ratio = self.config.container_bg_cover_ratio
+        overflow_tol = self.config.container_bg_overflow_tolerance_px
+        
         for child in tree.children:
             if child.kind != 'leaf' or child.leaf is None:
                 continue
@@ -141,12 +148,22 @@ class BackgroundMixin:
                 continue
             if not self._is_absorbable_bg_leaf(leaf, styles):
                 continue
+            
+            # 添加覆盖率检查（与 _try_absorb_container_bg 保持一致）
+            lbw = leaf.bbox.width
+            lbh = leaf.bbox.height
+            if lbw / cw < cover_ratio or lbh / ch < cover_ratio:
+                continue
+            if (leaf.bbox.left < -overflow_tol or
+                    leaf.bbox.top < -overflow_tol or
+                    leaf.bbox.right > cw + overflow_tol or
+                    leaf.bbox.bottom > ch + overflow_tol):
+                continue
+            
             candidates.append((leaf, styles))
 
         if not candidates:
             return []
-
-        container_bbox = self._container_css_bbox(group, fallback=tree.bbox)
 
         return self._merge_bg_candidates_into_container_css(
             container_elem=group,

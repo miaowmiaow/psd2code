@@ -169,6 +169,18 @@ class OccludedPrunerConfig:
     # 几何遮挡路径（B）要求：必须存在**单个**above 图层完整覆盖 X（不允许多层并集）。
     # 多层并集在 4px 降采样下常出现伪阳性（实际像素间有缝隙但采样点恰好都被打到）。
     require_single_layer_coverage: bool = True
+    # 覆盖判定的 alpha 阈值：Y 在该 alpha 以上视为可覆盖 X。
+    # ⚠️ 2026-06-23 优化：改为 200 而非 250。
+    # 理由：半透明 alpha=200 的覆盖物仍能遮挡完全不透明的被覆盖物。
+    # 降至 200 允许小量（1-2%）的半透明带，实用性更强，误删风险低。
+    # 同时加入 coverage_ratio_threshold 作为"加权"条件：
+    # - 如果 Y 的 alpha >= 250：要求 100% 覆盖（原逻辑）
+    # - 如果 Y 的 alpha >= 200：要求 95% 覆盖（新逻辑，容忍 5% 缝隙）
+    coverage_alpha: int = 200
+    # Y 覆盖 X 采样点的比例阈值。结合 coverage_alpha 使用：
+    # - 完全不透明（alpha >= 250）：要求 coverage_ratio >= 1.0（100%）
+    # - 高透明度（alpha >= coverage_alpha）：要求 coverage_ratio >= 该值（默认 0.95）
+    coverage_ratio_threshold: float = 0.95
 
     # ------------------------------------------------------------------
     # 路径 C：跨画布超大离屏图层（2026-05-27 新增）
@@ -328,6 +340,15 @@ class OccludedLayerPruner:
                 png_ref_count[r.bg_path] = png_ref_count.get(r.bg_path, 0) + 1
 
         pruned: List[Tuple[_LayerRecord, str]] = []
+        
+        # 路径 E：删除 width:0 或 height:0 的元素（无视觉贡献）
+        zero_size_pruned = []
+        for r in records:
+            if r.width == 0 or r.height == 0:
+                zero_size_pruned.append((r, f"width={r.width}, height={r.height}"))
+        
+        if zero_size_pruned:
+            pruned.extend(zero_size_pruned)
         # 检测时按 z 升序：先删低层以加速（但本算法对顺序不敏感）
         for X in sorted(candidates, key=lambda r: r.z_index):
             # 路径 C：跨画布超大离屏图层（廉价几何检查，先跑）
@@ -1101,12 +1122,32 @@ class OccludedLayerPruner:
             # 这里再硬性要求 ≥16 个采样点，作为路径 B 单层覆盖判定的最小证据量)
             if n_x_pixels < 16:
                 continue
-            covered = y_ds >= self.config.full_alpha
-            uncovered = x_pixels_for_coverage & ~covered
-            if int(uncovered.sum()) == 0:
+            
+            # 2026-06-23 优化：加权覆盖判定
+            # 方案 D + 方案 A：
+            # 1. 先检查 Y 的完全不透明覆盖（alpha >= 250）→ 要求 100%
+            # 2. 再检查 Y 的高透明度覆盖（alpha >= coverage_alpha）→ 要求覆盖率 >= threshold
+            covered_full = y_ds >= self.config.full_alpha  # >= 250
+            uncovered_full = x_pixels_for_coverage & ~covered_full
+            n_uncovered_full = int(uncovered_full.sum())
+            
+            if n_uncovered_full == 0:
+                # 路径 1：Y 的 alpha >= 250 完全覆盖 X 100%
                 return True, (
-                    f"被单层 .{Y.css_class}(z={Y.z_index}) 100% 覆盖 "
+                    f"被单层 .{Y.css_class}(z={Y.z_index}) 完全不透明 100% 覆盖 "
                     f"({n_x_pixels} 采样点)"
+                )
+            
+            # 路径 2：Y 的 alpha >= coverage_alpha（200） 覆盖 X >= 95%
+            covered_partial = y_ds >= self.config.coverage_alpha
+            uncovered_partial = x_pixels_for_coverage & ~covered_partial
+            n_uncovered_partial = int(uncovered_partial.sum())
+            coverage_ratio = 1.0 - (n_uncovered_partial / n_x_pixels)
+            
+            if coverage_ratio >= self.config.coverage_ratio_threshold:
+                return True, (
+                    f"被单层 .{Y.css_class}(z={Y.z_index}) alpha>={self.config.coverage_alpha} "
+                    f"覆盖 {100*coverage_ratio:.1f}% ({n_x_pixels - n_uncovered_partial}/{n_x_pixels} 采样点)"
                 )
 
         return False, ""

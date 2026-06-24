@@ -30,7 +30,7 @@ class TestHtmlPipeline:
 
     def test_stage_count(self):
         p = self._build()
-        assert len(p.stages) == 5
+        assert len(p.stages) == 6
 
     def test_stage_names(self):
         p = self._build()
@@ -41,6 +41,7 @@ class TestHtmlPipeline:
             "html_codegen",
             "prune_pre_optimize",
             "layout_optimize",
+            "background_layer_absorption",
         ]
 
     def test_stage_types(self):
@@ -50,6 +51,7 @@ class TestHtmlPipeline:
             HtmlCodegenStage,
             PrunePreOptimizeStage,
             LayoutOptimizeStage,
+            BackgroundLayerAbsorptionStage,
         )
         p = self._build()
         stage_types = [type(s) for s in p.stages]
@@ -59,6 +61,7 @@ class TestHtmlPipeline:
             HtmlCodegenStage,
             PrunePreOptimizeStage,
             LayoutOptimizeStage,
+            BackgroundLayerAbsorptionStage,
         ]
 
     def test_all_stages_are_stage_subclass(self):
@@ -81,18 +84,19 @@ class TestReactPipeline:
 
     def test_stage_count(self):
         p = self._build()
-        # HTML 5 stages + 2 react stages = 7
+        # HTML 6 stages + 2 react stages = 8, but BackgroundLayerAbsorption not in React
         assert len(p.stages) == 7
 
     def test_shares_html_prefix(self):
-        """First 5 stages should match HTML pipeline stages."""
+        """First 5 stages should match HTML pipeline stages (excluding BackgroundLayerAbsorption)."""
         from targets.html.pipeline import build_html_pipeline
         ctx_html = PipelineContext(psd_path=Path("test.psd"))
         html_p = build_html_pipeline(ctx_html)
         react_p = self._build()
-        html_names = [s.name for s in html_p.stages]
+        # React uses the first 5 HTML stages (excluding BackgroundLayerAbsorption)
+        html_base_names = [s.name for s in html_p.stages[:5]]
         react_prefix = [s.name for s in react_p.stages[:5]]
-        assert react_prefix == html_names
+        assert react_prefix == html_base_names
 
     def test_react_specific_stages(self):
         p = self._build()
@@ -119,18 +123,19 @@ class TestVuePipeline:
 
     def test_stage_count(self):
         p = self._build()
-        # HTML 5 stages + 2 vue stages = 7
+        # HTML 6 stages + 2 vue stages = 8, but BackgroundLayerAbsorption not in Vue
         assert len(p.stages) == 7
 
     def test_shares_html_prefix(self):
-        """First 5 stages should match HTML pipeline stages."""
+        """First 5 stages should match HTML pipeline stages (excluding BackgroundLayerAbsorption)."""
         from targets.html.pipeline import build_html_pipeline
         ctx_html = PipelineContext(psd_path=Path("test.psd"))
         html_p = build_html_pipeline(ctx_html)
         vue_p = self._build()
-        html_names = [s.name for s in html_p.stages]
+        # Vue uses the first 5 HTML stages (excluding BackgroundLayerAbsorption)
+        html_base_names = [s.name for s in html_p.stages[:5]]
         vue_prefix = [s.name for s in vue_p.stages[:5]]
-        assert vue_prefix == html_names
+        assert vue_prefix == html_base_names
 
     def test_vue_specific_stages(self):
         p = self._build()
@@ -257,13 +262,13 @@ class TestCrossTargetConsistency:
         react_p = build_react_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="react"))
         vue_p = build_vue_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="vue"))
 
-        # All three should share the same first 5 stage types
-        html_types = [type(s).__name__ for s in html_p.stages]
+        # React/Vue share the first 5 HTML stages (excluding BackgroundLayerAbsorption)
+        html_base_types = [type(s).__name__ for s in html_p.stages[:5]]
         react_prefix = [type(s).__name__ for s in react_p.stages[:5]]
         vue_prefix = [type(s).__name__ for s in vue_p.stages[:5]]
 
-        assert react_prefix == html_types
-        assert vue_prefix == html_types
+        assert react_prefix == html_base_types
+        assert vue_prefix == html_base_types
 
     def test_react_vue_have_extra_stages(self):
         from targets.react.pipeline import build_react_pipeline

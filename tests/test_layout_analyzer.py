@@ -274,6 +274,20 @@ class TestClassifyChildren:
         assert "icon" not in decor
         assert len(content) == 2
 
+    def test_large_group_with_bg_image_can_be_bg(self):
+        """带 background-image 的大 group 允许作为 bg 候选。"""
+        children = [
+            _make_child_info("bg-wrap", 0, 0, 300, 200, data_type="group", opacity=1.0),
+            _make_child_info("txt", 40, 40, 100, 30, data_type="text", opacity=1.0),
+        ]
+        children[0]["has_bg_image"] = True
+        children[1]["has_bg_image"] = False
+
+        analyzer = _make_analyzer()
+        bg, decor, content = analyzer._classify_children(children)
+        assert "bg-wrap" in bg
+        assert "txt" in [c["class"] for c in content]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TestDetectTrendLayout
@@ -347,6 +361,33 @@ class TestDetectTrendLayout:
         layout, v, h = analyzer._detect_trend_layout(items)
         assert layout == "horizontal"
         assert h == 1
+
+    def test_r02_center_tolerance_allows_vertical_chain(self):
+        """R02: 交叉轴投影不足但中心线接近时，仍可判为 vertical。"""
+        items = [
+            _make_child_info("a", 0, 0, 60, 40),
+            _make_child_info("b", 50, 50, 60, 40),
+            _make_child_info("c", 100, 100, 60, 40),
+        ]
+        # a-b / b-c 在 X 轴几乎不重叠（ov=10, ratio=10/60<0.5），
+        # 但中心线差值均为 50px，落在 CENTER_ALIGN_TOLERANCE_PX(56) 内。
+        analyzer = _make_analyzer()
+        layout, v, h = analyzer._detect_trend_layout(items)
+        assert layout == "vertical"
+        assert v >= 2
+
+    def test_r03_gap_consistency_helps_docflow_vertical(self):
+        """R03: 间距稳定时，趋势检测可稳定识别主方向。"""
+        items = [
+            _make_child_info("a", 0, 0, 50, 20),
+            _make_child_info("b", 80, 35, 50, 20),
+            _make_child_info("c", 160, 70, 50, 20),
+        ]
+        analyzer = _make_analyzer()
+        layout, v, h = analyzer._detect_trend_layout(items)
+        # 该几何更偏向横向串链，核心是 R03 使主方向判断稳定。
+        assert layout == "horizontal"
+        assert h >= 2
 
     def test_single_item_none(self):
         """单个元素不检测趋势"""
@@ -590,6 +631,34 @@ class TestAnalyzeChildrenLayout:
         analyzer = LayoutAnalyzer(css)
         result = analyzer.analyze_children_layout(children)
         # 所有子在 (0,0) size=0 → 无法产生趋势
+        assert result["layout_type"] == "none"
+
+    def test_r28_doc_flow_priority_detects_vertical(self):
+        """R28: 无重叠、纵向文档流容器可被识别为 vertical。"""
+        items = [
+            {"name": "a", "left": 10, "top": 0, "width": 100, "height": 20},
+            {"name": "b", "left": 18, "top": 30, "width": 100, "height": 20},
+            {"name": "c", "left": 14, "top": 60, "width": 100, "height": 20},
+        ]
+        css = self._build_css_rules(items)
+        children = [_make_bs4_child(i["name"]) for i in items]
+
+        analyzer = LayoutAnalyzer(css)
+        result = analyzer.analyze_children_layout(children)
+        assert result["layout_type"] == "vertical"
+
+    def test_r28_rejects_heavy_overlap(self):
+        """R28: 有显著重叠时不得误判为文档流布局。"""
+        items = [
+            {"name": "a", "left": 0, "top": 0, "width": 100, "height": 80},
+            {"name": "b", "left": 10, "top": 20, "width": 100, "height": 80},
+            {"name": "c", "left": 20, "top": 40, "width": 100, "height": 80},
+        ]
+        css = self._build_css_rules(items)
+        children = [_make_bs4_child(i["name"]) for i in items]
+
+        analyzer = LayoutAnalyzer(css)
+        result = analyzer.analyze_children_layout(children)
         assert result["layout_type"] == "none"
 
 

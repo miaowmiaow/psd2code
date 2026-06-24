@@ -107,9 +107,10 @@ class PositionRelaxerConfig:
         })
     )
     # 哪些字段直接全删（不取众数，因为完全是噪声）
-    # z-index 流式布局下纯冗余；DOM 顺序天然兜底
+    # ⚠️ z-index 不再在此删除：PSD转码时z-index用来区分相对叠序，需保留
+    # (2026-06-23修复：z-index 从 drop_props 移除，改为从 noise_props 中取众数)
     drop_props: FrozenSet[str] = field(
-        default_factory=lambda: frozenset({"z-index"})
+        default_factory=lambda: frozenset()
     )
 
 
@@ -315,16 +316,14 @@ class PositionNoiseRelaxer:
 
         策略：
         - 非位置字段：直接来自 ``non_noise_sig``（已是组共识）；
-        - drop_props 中的字段（z-index）：直接丢弃；
-        - 其它噪声字段（margin-top 等）：取组内众数；平局取首成员的值（DOM 序）。
+        - 噪声字段（margin-top / z-index 等）：取组内众数；平局取首成员的值（DOM 序）。
+          特别地，z-index 需要保留（PSD转码时用来区分相对叠序）。
         """
         # 收集每个噪声字段在所有成员中的取值
         noise_values: Dict[str, List[str]] = defaultdict(list)
         for sel in members:
             props = self.css_rules.get(sel, {})
             for prop in self.config.noise_props:
-                if prop in self.config.drop_props:
-                    continue
                 if prop in props:
                     noise_values[prop].append(str(props[prop]))
 
@@ -346,7 +345,7 @@ class PositionNoiseRelaxer:
         result: Dict[str, str] = {}
         for k, v in first_props.items():
             if k in self.config.drop_props:
-                continue  # 直接丢弃 z-index
+                continue  # drop_props 现在为空，此逻辑为兜底
             if k in self.config.noise_props:
                 if k in normalized_noise:
                     result[k] = normalized_noise[k]

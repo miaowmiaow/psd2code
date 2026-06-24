@@ -435,6 +435,77 @@ class LayoutOptimizeStage(Stage):
 
 
 # ---------------------------------------------------------------------------
+# Stage 6: Final Pass — 背景层吸收优化
+# ---------------------------------------------------------------------------
+
+class BackgroundLayerAbsorptionStage(Stage):
+    """背景层吸收优化：识别并吸收背景层元素到父容器（V2 安全版）。
+
+    运行在 LayoutOptimizeStage 之后的独立优化流程。
+    处理对象：index_optimized.html / style_optimized.css
+    
+    V2 特点：
+    - 使用 BeautifulSoup 而非正则表达式（更可靠）
+    - 每个容器分配唯一 ID，避免 CSS 全局污染
+    - 明确的容器身份管理，确保选择器与 DOM 元素的对应关系正确
+    """
+
+    name = "background_layer_absorption"
+
+    def run(self, ctx: PipelineContext) -> PipelineContext:
+        from common.css_utils import dict_to_css, parse_css_to_dict  # type: ignore
+        from targets.html.postprocess.layout_optimizer.transformers.background_layer_absorber_v2 import (  # type: ignore
+            absorb_background_layers_safe,
+        )
+
+        html_path = ctx.get("html_path")
+        if not html_path:
+            ctx.log("background_layer_absorption: skipped (no html_path)")
+            return ctx
+
+        html_path = Path(html_path)
+        css_path = html_path.parent / "style_optimized.css"
+
+        if not (html_path.exists() and css_path.exists()):
+            ctx.log("background_layer_absorption: skipped (optimized html/css missing)")
+            return ctx
+
+        try:
+            from common.css_utils import extract_global_css_header  # type: ignore
+
+            print("\n🎨 应用背景层吸收优化（V2 安全版）...")
+            html_content = html_path.read_text(encoding="utf-8")
+            css_content = css_path.read_text(encoding="utf-8")
+            css_header = extract_global_css_header(css_content)
+            css_rules = parse_css_to_dict(css_content)
+
+            html_final, css_final, stats = absorb_background_layers_safe(html_content, css_rules)
+
+            if stats.get("bg_layers_absorbed", 0) > 0:
+                # 写入优化结果
+                html_path.write_text(html_final, encoding="utf-8")
+                css_final_text = dict_to_css(css_final, header=css_header)
+                css_path.write_text(css_final_text, encoding="utf-8")
+
+                print(
+                    f"   - 背景层吸收: 吸收 {stats['bg_layers_absorbed']} 个, "
+                    f"移除 {stats['bg_elements_removed']} 个元素"
+                )
+                if "absorbed_element" in stats:
+                    print(f"      (吸收的元素: {stats['absorbed_element']})")
+                ctx.set("bg_absorption_stats", stats)
+            else:
+                print("   - 背景层吸收: 无符合条件的背景层")
+
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  背景层吸收失败（保留优化版本）: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return ctx
+
+
+# ---------------------------------------------------------------------------
 # Pipeline assembly
 # ---------------------------------------------------------------------------
 
@@ -445,4 +516,5 @@ def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
         HtmlCodegenStage(),
         PrunePreOptimizeStage(),
         LayoutOptimizeStage(),
+        BackgroundLayerAbsorptionStage(),
     ])

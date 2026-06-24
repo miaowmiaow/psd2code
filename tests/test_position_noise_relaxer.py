@@ -113,9 +113,11 @@ class TestBasicNormalization:
         assert stats["position_relaxed_groups"] == 1
         assert stats["position_relaxed_classes"] == 5
 
-    def test_z_index_dropped(self):
-        """z-index should be entirely removed (drop_props)."""
+    def test_z_index_preserved_as_mode(self):
+        """z-index should be preserved as the mode value (众数)."""
         css_rules = {}
+        # 创建 4 个类，z-index 值为 10, 18, 26, 34
+        # 众数应该取其中最常见的值或第一个
         for i in range(4):
             sel = f".card__{i + 20}"
             css_rules[sel] = {
@@ -129,8 +131,10 @@ class TestBasicNormalization:
 
         PositionNoiseRelaxer(soup, css_rules, stats).run()
 
+        # z-index 应该被保留为众数值
         for sel in css_rules:
-            assert "z-index" not in css_rules[sel]
+            assert "z-index" in css_rules[sel]
+            assert css_rules[sel]["z-index"] == "10"  # 众数应该是第一个值
 
     def test_merge_groups_populated(self):
         """After normalization, members should appear in _css_merge_groups."""
