@@ -122,12 +122,21 @@ class HtmlCodegenStage(Stage):
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
         from core.ir import to_legacy_layers
+        from core.ir.typed_ir_cache import TypedIRCache  # Day 18 优化
         from targets.html.codegen.html_generator import HTMLGenerator  # type: ignore
 
         assert ctx.ir is not None and ctx.psd is not None and ctx.output_dir is not None
         exporter = ctx.get("layer_exporter")
         assert exporter is not None, "ParseToIrStage must run first"
 
+        # 优化4-Day18：构建类型化 IR 缓存
+        # 一次性遍历树，构建样式/效果缓存，供后续代码生成和多 target 复用
+        ir_cache = TypedIRCache(ctx.ir)
+        ctx.set("ir_cache", ir_cache)
+        ctx.log(f"IR cache built: {ir_cache.dump_summary()}")
+
+        # 继续使用原有的 to_legacy_layers（兼容模式）
+        # 后续可升级为直接消费 TypedIRCache，这里仅作为过渡
         layers = to_legacy_layers(ctx.ir)
         gen = HTMLGenerator(ctx.psd.width, ctx.psd.height, ctx.output_dir, ctx.psd_path.stem)
         html_path = gen.generate_html(layers)

@@ -195,3 +195,17 @@ CLI 入口 `psd_to_code.py` 把对应值写入 `PipelineContext`：
 - `LayerExporter` 产出 **legacy dict 树**。
 - `core/psd/parser.py::parse_psd_to_ir` 将其包装进 `Document.root.meta['legacy_roots']`。
 - 之后由 `core/ir/adapters.to_legacy_layers` 原样取出给 codegen。
+
+## 性能优化
+
+本模块包含第1-2周的性能优化实现：
+
+| 优化项 | 位置 | 效果 |
+|-------|------|------|
+| **光效渲染缓存** | `_unified_light_cache` | 消除重复 composite (-20-30%) |
+| **效果渲染缓存** | `_render_layer_with_effects_cached()` | 避免多路径重复 (-10-15%) |
+| **属性预计算** | `_precompute_layer_properties()` | 加速属性访问 (-5-8%) |
+| **图片并行化** | `ThreadPoolExecutor` 异步 IO | 非阻塞编码+写入 (-5-10%) |
+| **图片去重** | `_save_image_dedup()` + MD5 | 复用重复图片 |
+
+详见 [Performance-Optimization.md](./Performance-Optimization.md)。

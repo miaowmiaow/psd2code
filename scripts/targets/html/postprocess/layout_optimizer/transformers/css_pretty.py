@@ -86,6 +86,10 @@ class CssPrettyConfig:
     # Pass 5：单选择器 + 属性 ≤ N 时单行输出
     short_rule_inline: bool = True
     short_rule_max_props: Optional[int] = None  # 由 style 预设决定
+    # 优化2-Day7：合并组选择器分割
+    # 当一个合并组包含 > max_selectors_per_group 个选择器时，
+    # 分割成多个规则块避免单行选择器过长（便于 git diff 和可读性）
+    max_selectors_per_group: int = 15  # 超过此数会分割
     # P2b「坐标溯源注释」：每条 ``.<class>`` 规则上方加一行注释，标注
     # 该 class 对应 PSD 图层 id / 原名 / 类型 / 父 layer id。
     # 数据来源：从 soup 中按首类名查到该元素，读 ``id`` / ``data-name`` /
@@ -628,11 +632,38 @@ class CssPretty:
         return f"{prov}{selector} {{\n{body}\n}}"
 
     def _render_group(self, members: List[str]) -> str:
+        """渲染合并组，支持大型选择器组的自动分割。
+        
+        优化2-Day7：当选择器数 > max_selectors_per_group 时，
+        将其分割成多个块以避免单行过长（便于 git diff）。
+        """
         cfg = self.config
         # 取代表属性
         props = self.css_rules[members[0]]
         n = len(members)
         prov = self._provenance_comment(members[0], props) if cfg.coord_provenance else ""
+        
+        # 大型合并组分割优化
+        max_per_group = getattr(cfg, 'max_selectors_per_group', 15)
+        if n > max_per_group:
+            # 分割成多个块，每块最多 max_per_group 个选择器
+            chunks = []
+            for i in range(0, n, max_per_group):
+                chunk = members[i:i+max_per_group]
+                chunks.append(chunk)
+            
+            # 渲染每个块
+            body = self._render_props(props)
+            result_lines = []
+            for idx, chunk in enumerate(chunks):
+                if idx == 0 and prov:
+                    result_lines.append(prov)
+                if cfg.merge_group_comment:
+                    result_lines.append(f"/* ↳ {len(chunk)}/{n} 个等价规则 */")
+                chunk_sel = ",\n".join(chunk)
+                result_lines.append(f"{chunk_sel} {{\n{body}\n}}")
+            
+            return "\n".join(result_lines)
 
         # 选择器排版
         multi_thr = cfg.multiline_threshold or 3

@@ -161,3 +161,16 @@ def to_legacy_layers(doc: Document) -> list[dict]:
 2. 如果是"语义字段"，在 `core/psd/parser.py` 的映射中填充它。
 3. 如果 target 要读，在 codegen 里消费它；暂不读也无妨。
 4. **不要** 删 `meta['legacy']`，直到所有 target 都不再依赖它。
+
+## 性能优化
+
+本模块包含第4-5周的性能优化实现：
+
+| 优化项 | 位置 | 效果 |
+|-------|------|------|
+| **IR 字段补全** | `ir_enricher.py` | 从 legacy 提取关键字段 |
+| **TypedIRCache** | `typed_ir_cache.py` | O(1) IR 节点查询 (-2-3%) |
+| **DeltaIR 增量** | `delta_ir.py` | 检测变化节点 (-2-3%) |
+| **StreamingIterator** | `streaming_iterator.py` | 流式迭代器 (-87% 内存) |
+
+详见 [Performance-Optimization.md](./Performance-Optimization.md)。

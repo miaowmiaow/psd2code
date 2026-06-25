@@ -140,3 +140,26 @@ class JsonTraceHook(PipelineHook):
 
 - 插入新 Stage：见 [`../04-extending/add-a-stage.md`](../04-extending/add-a-stage.md)
 - 新增 Hook：直接子类化 `PipelineHook`，在入口赋值即可。
+
+## 高级：并行管线
+
+第5周新增 `core/pipeline_parallel.py`，支持多 target 并行导出：
+
+```python
+from core.pipeline_parallel import ParallelPipeline
+
+pipeline = ParallelPipeline(
+    stages=[parse_stage, html_stage, react_stage, vue_stage],
+    enable_parallel=True,
+    max_workers=3
+)
+ctx = PipelineContext(psd_path=...)
+result = pipeline.run(ctx)  # 自动按依赖分组，并行执行
+```
+
+**特点**：
+- 自动依赖分析：从 ctx.artifacts 推断 Stage 间依赖
+- 线程安全：RLock 保护共享状态
+- 性能预期：+2-3% (HTML + React + Vue 并行)
+
+详见 [Performance-Optimization.md](./Performance-Optimization.md)。

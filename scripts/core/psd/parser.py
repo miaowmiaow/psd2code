@@ -34,6 +34,7 @@ from core.ir import (
     TextNode,
 )
 from core.extract.layer_exporter import LayerExporter
+from core.psd.ir_enricher import enrich_ir_document  # Day 16-17 优化
 
 
 # ---------------------------------------------------------------------------
@@ -172,4 +173,10 @@ def parse_psd_to_ir(
             "skipped_count": exporter.skipped_count,
         },
     )
+    
+    # 优化4-Day16-17：后处理补全 IR 字段
+    # 从 legacy dict 中提取 z-index / background / border-radius / font / effects
+    # 这样转换后的 IR 就包含完整的类型化信息，可直接驱动代码生成
+    enrich_ir_document(doc)
+    
     return doc, exporter, legacy_tree

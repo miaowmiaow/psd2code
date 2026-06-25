@@ -91,6 +91,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+import hashlib
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,9 @@ class CssDedup:
         # Pass 1 统计：被删掉的 z-index 数
         self.stats.setdefault('z_index_pruned', 0)
         # Pass 1.5 统计：混合状态下被补/改写的 z-index 数
+        
+        # 优化2-Day6：签名缓存，避免重复计算规则属性签名
+        self._signature_cache: Dict[int, str] = {}  # key=id(props_dict), value=hash签名
         self.stats.setdefault('z_index_filled', 0)
         # Pass 2 统计：被合并的规则条数（节省条数）
         self.stats.setdefault('css_rules_merged', 0)
@@ -487,8 +491,27 @@ class CssDedup:
         return sel.startswith('.v-')
 
     # ------------------------------------------------------------------
-    # Pass 2: 等价规则合并
+    # Pass 2: 等价规则合并（含签名缓存优化）
     # ------------------------------------------------------------------
+
+    def _compute_props_signature(self, props: Dict[str, str]) -> str:
+        """计算规则属性的签名哈希，用于快速比较。
+        
+        优化2-Day6：使用 MD5 哈希替代 tuple 比较，减少大规模规则集合的内存占用。
+        对于超大型 CSS（1000+ 规则），tuple 比较会产生大量临时对象；
+        哈希方式可以显著降低内存峰值和比较时间。
+        """
+        props_id = id(props)
+        if props_id in self._signature_cache:
+            return self._signature_cache[props_id]
+        
+        # 构建规范化的签名字符串：按 key 排序
+        items = sorted(props.items())
+        sig_str = '|'.join(f'{k}={v}' for k, v in items)
+        sig_hash = hashlib.md5(sig_str.encode()).hexdigest()
+        
+        self._signature_cache[props_id] = sig_hash
+        return sig_hash
 
     def _merge_equivalent_rules(self) -> None:
         """把"属性完全相同"的选择器分到同组。
@@ -497,15 +520,15 @@ class CssDedup:
         - 同组内 selector 按字母排序，便于稳定输出
         - ✅ z-index 现在参与签名比较：防止不同 z-index 的规则被错误合并
           （例如 .img__50 z=50 / .img__44 z=44 不应被识别为"等价"而合并）
+        - ✅ 优化2-Day6：使用哈希签名替代 tuple，加速大规模规则合并
         """
-        # 签名 = 排序后的 (key, value) 元组，包括 z-index
-        sig_to_selectors: Dict[Tuple[Tuple[str, str], ...], List[str]] = defaultdict(list)
+        # 优化：使用哈希签名而不是 tuple，减少内存占用
+        sig_to_selectors: Dict[str, List[str]] = defaultdict(list)
         for sel, props in self.css_rules.items():
             if not props:
                 continue
-            # ✅ 修复：包含 z-index 在签名比较中，不同 z-index = 不等价
-            sig_items = [(k, v) for k, v in props.items()]  # 不排除 z-index
-            sig = tuple(sorted(sig_items))
+            # 计算规范化签名（已包含所有属性包括 z-index）
+            sig = self._compute_props_signature(props)
             sig_to_selectors[sig].append(sel)
 
         groups: List[List[str]] = []
@@ -519,6 +542,10 @@ class CssDedup:
 
         # 输出顺序：按"组内首个选择器"字母升序，方便阅读
         groups.sort(key=lambda g: g[0])
+        
+        # 缓存清理（Pass 2 完成后不再需要）
+        self._signature_cache.clear()
+        
         self.stats['css_rules_merged'] = merged_count
         self.stats['_css_merge_groups'] = groups
 
