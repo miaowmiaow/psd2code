@@ -347,25 +347,40 @@ class DOMRestructure(
             leaf = leaves[0]
             return LayoutNode(kind='leaf', bbox=leaf.bbox, leaf=leaf)
 
-        bg_leaves, fg_leaves = self._extract_background_leaves(leaves)
+        # 改进：先提取装饰层（在背景还存在的完整集合上），避免背景对中位数的影响
+        # 这样装饰层提取的条件更稳定、更一致
+        decor_leaves_initial, remaining_initial = self._extract_tall_decor_leaves(leaves)
+        
+        # 如果有装饰层被提取，基于剩余元素做背景剥离
+        work_leaves = remaining_initial if decor_leaves_initial else leaves
+        
+        bg_leaves, fg_leaves = self._extract_background_leaves(work_leaves)
         if bg_leaves and len(fg_leaves) >= 1:
             fg_tree = self._build_tree_without_bg(fg_leaves)
             if fg_tree.kind in ('row', 'col'):
                 envelope = self._envelope([l.bbox for l in leaves])
                 children = [self._leaf_to_node(bg) for bg in bg_leaves]
                 children.append(fg_tree)
+                # 如果初始有装饰层，也加进来
+                if decor_leaves_initial:
+                    children = [self._leaf_to_node(d) for d in decor_leaves_initial] + children
                 return LayoutNode(
                     kind='stack',
                     bbox=envelope,
                     children=children,
                 )
 
-        decor_leaves, fg_leaves2 = self._extract_tall_decor_leaves(leaves)
-        if decor_leaves and len(fg_leaves2) >= 2:
-            fg_tree = self._build_tree_without_bg(fg_leaves2)
+        # 如果初始提取的装饰层存在，且剩余前景可以聚类成row/col
+        if decor_leaves_initial and len(remaining_initial) >= 2:
+            fg_tree = self._cluster(remaining_initial) if not self._is_stack_group(
+                [l.bbox for l in remaining_initial]) else LayoutNode(
+                    kind='stack',
+                    bbox=self._envelope([l.bbox for l in remaining_initial]),
+                    children=[self._leaf_to_node(l) for l in remaining_initial],
+                )
             if fg_tree.kind in ('row', 'col'):
                 envelope = self._envelope([l.bbox for l in leaves])
-                children = [self._leaf_to_node(d) for d in decor_leaves]
+                children = [self._leaf_to_node(d) for d in decor_leaves_initial]
                 children.append(fg_tree)
                 return LayoutNode(
                     kind='stack',
@@ -383,28 +398,10 @@ class DOMRestructure(
         return self._cluster(leaves)
 
     def _build_tree_without_bg(self, leaves: List[LeafInfo]) -> LayoutNode:
-        """构建前景 leaves 的布局树（不再递归做背景剥离）"""
+        """构建前景 leaves 的布局树（不再递归做背景剥离，也不再做装饰层提取，因为已在上层做过）"""
         if len(leaves) == 1:
             leaf = leaves[0]
             return LayoutNode(kind='leaf', bbox=leaf.bbox, leaf=leaf)
-
-        decor_leaves, fg_leaves = self._extract_tall_decor_leaves(leaves)
-        if decor_leaves and len(fg_leaves) >= 2:
-            inner_tree = self._cluster(fg_leaves) if not self._is_stack_group(
-                [l.bbox for l in fg_leaves]) else LayoutNode(
-                    kind='stack',
-                    bbox=self._envelope([l.bbox for l in fg_leaves]),
-                    children=[self._leaf_to_node(l) for l in fg_leaves],
-                )
-            if inner_tree.kind in ('row', 'col'):
-                envelope = self._envelope([l.bbox for l in leaves])
-                children = [self._leaf_to_node(d) for d in decor_leaves]
-                children.append(inner_tree)
-                return LayoutNode(
-                    kind='stack',
-                    bbox=envelope,
-                    children=children,
-                )
 
         if self._is_stack_group([l.bbox for l in leaves]):
             return LayoutNode(

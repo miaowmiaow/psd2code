@@ -448,6 +448,18 @@ def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
                     break
         if not has_stroke_effect:
             return None
+        
+        # 改进：如果 shape 有自定义矢量路径（被 Invalidated 标记），
+        # 不应该用 origination 的基础几何（如 RoundedRectangle）来自渲染，
+        # 因为实际形状已经编辑过，与 origination 不一致（e.g. 标签形状的尖角）。
+        # 此时应该让 composite() 处理。
+        orig_list = getattr(layer, 'origination', None) or []
+        if len(orig_list) > 1:
+            # origination[1] 通常是 Invalidated
+            invalidated = orig_list[1]
+            if hasattr(invalidated, 'invalidated') and invalidated.invalidated:
+                # Shape 已被编辑，形状信息不可信，让 composite() 处理
+                return None
 
         # 必须有 SoCo 填充色
         soco = None

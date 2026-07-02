@@ -442,7 +442,10 @@ class CssDedup:
             - 已有 z 且 z > cursor → 保留原 z，cursor = z
             - 已有 z 但 z <= cursor → **保留原 z**（v-* / 普通子均如此）；
               cursor 取 max(cursor, z)，确保后续兄弟 z 都更大
-            - 无 z（auto） → 分配 cursor + 1，**写回 css_rules**（含 v-*）
+            - 无 z（auto） → 查找子元素z-index：
+              * 若有子元素带z-index，取最小值；
+              * 否则分配 cursor + 1；
+              写回 css_rules（含 v-*）
 
         为什么 v-* 也必须写入 z：
           v-* wrapper（v-stack/v-col/v-row）若保持 auto，会被同容器里
@@ -470,15 +473,86 @@ class CssDedup:
                 # 保留原 z；cursor 跟随推进
                 cursor = max(cursor, z)
                 continue
-            # 无 z（auto）→ 必须补一个 z 值（含 v-* wrapper）
-            target = cursor + 1
-            cursor = target
+            # 无 z（auto）→ 先查找子元素 z-index，然后补 z 值（含 v-* wrapper）
             rule = self.css_rules.get(sel)
             if rule is None:
                 continue
+            
+            # 尝试从子元素找最小 z-index
+            child_min_z = self._find_children_min_z_index(sel)
+            if child_min_z is not None:
+                target = child_min_z
+            else:
+                target = cursor + 1
+            
+            cursor = max(cursor, target)
             rule['z-index'] = str(target)
             modified += 1
         return modified
+
+    def _find_children_min_z_index(self, parent_sel: str) -> Optional[int]:
+        """通过遍历 DOM 找出父元素的直接子元素中的最小 z-index。
+        
+        原理：使用 BeautifulSoup 遍历 DOM 树，找到与 parent_sel 匹配的元素，
+        然后遍历其所有直接子元素，查找带 z-index 的最小值。
+        
+        Args:
+            parent_sel: 父选择器，如 '.wuzi-bg-5-stack'（必须以 . 开头）
+        
+        Returns:
+            子元素中的最小 z-index（整数）；若无子元素或无 z-index 则返回 None
+        """
+        if not parent_sel or not parent_sel.startswith('.') or not self.soup:
+            return None
+        
+        parent_class = parent_sel[1:]  # 去掉 '.'
+        
+        try:
+            from bs4 import NavigableString
+        except ImportError:
+            return None
+        
+        # 在 DOM 中查找所有具有该类名的元素
+        parent_elements = self.soup.find_all(class_=parent_class)
+        if not parent_elements:
+            return None
+        
+        min_z = None
+        
+        # 遍历每个匹配的父元素
+        for parent_elem in parent_elements:
+            # 遍历该父元素的直接子元素（children，不是 descendants）
+            for child_elem in parent_elem.children:
+                # 跳过文本节点
+                if isinstance(child_elem, NavigableString):
+                    continue
+                
+                # 获取子元素的类名
+                child_classes = child_elem.get('class', [])
+                if not child_classes:
+                    continue
+                
+                # 取第一个类名作为 CSS 选择器
+                child_class = child_classes[0]
+                child_sel = f'.{child_class}'
+                
+                # 查找该类名的 CSS 规则，看是否有 z-index
+                css_props = self.css_rules.get(child_sel)
+                if css_props is None:
+                    continue
+                
+                z_str = css_props.get('z-index')
+                if z_str is None or z_str == 'auto':
+                    continue
+                
+                try:
+                    z_val = int(str(z_str).strip())
+                    if min_z is None or z_val < min_z:
+                        min_z = z_val
+                except (ValueError, TypeError):
+                    continue
+        
+        return min_z
 
     @staticmethod
     def _is_virtual_wrapper_selector(sel: str) -> bool:

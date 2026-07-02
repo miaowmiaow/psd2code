@@ -167,13 +167,46 @@ class ClusteringMixin:
     # ------------------------------------------------------------------
 
     def _is_stack_group(self, bboxes: List[BBox]) -> bool:
+        """判定是否为叠图组（stack）
+        
+        基于两个条件：
+        1. 存在高重叠对（重叠率 >= threshold）
+        2. 存在包含关系（某个元素被其他元素完全包含）
+        
+        只有同时满足这两个条件，才判定为真正的堆叠。
+        这样可以避免"装饰元素与前景元素有部分重叠"被误判为堆叠。
+        """
         effective = [b for b in bboxes if b.area > 0]
         n = len(effective)
         if n < 2:
             return False
+        
+        # 检查是否存在包含关系
+        has_containment = False
+        for i, a in enumerate(effective):
+            for j, b in enumerate(effective):
+                if i != j and self._contains(a, b):
+                    has_containment = True
+                    break
+            if has_containment:
+                break
+        
+        # 没有包含关系，不判定为 stack
+        if not has_containment:
+            return False
+        
+        # 存在包含关系，再检查高重叠对比例
         total_pairs = n * (n - 1) // 2
         stack_pairs = 0
         for a, b in combinations(effective, 2):
             if a.overlap_ratio(b) >= self.config.stack_pair_threshold:
                 stack_pairs += 1
         return stack_pairs / total_pairs >= self.config.stack_majority
+    
+    @staticmethod
+    def _contains(parent: BBox, child: BBox) -> bool:
+        """判定 parent 是否完全包含 child"""
+        return (parent.left <= child.left and
+                parent.top <= child.top and
+                parent.left + parent.width >= child.left + child.width and
+                parent.top + parent.height >= child.top + child.height)

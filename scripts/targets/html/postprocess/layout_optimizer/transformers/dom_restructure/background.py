@@ -180,7 +180,8 @@ class BackgroundMixin:
         leaf: LeafInfo, styles: Dict[str, str],
     ) -> bool:
         """判定一个 leaf 是否满足"可视为背景"的安全基线（合成层面）"""
-        if leaf.data_type != 'image':
+        # 允许 image 或 layer-group 类型通过（layer-group 可能是背景容器如 frame）
+        if leaf.data_type not in ('image', 'layer-group'):
             return False
         blend = (styles.get('mix-blend-mode') or '').strip().lower()
         if blend and blend != 'normal':
