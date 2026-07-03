@@ -23,6 +23,14 @@ from typing import Dict, List, Optional
 from ...analyzers.layout_analyzer import LayoutAnalyzer
 from ...utils.css_parser import CSSParser
 from .data_types import BBox, LeafInfo, LayoutNode, ClusterConfig
+from .handlers import (
+    BackgroundHandler,
+    TallDecorHandler,
+    ClusteringHandler,
+    RenderingHandler,
+    ReclassifyHandler,
+)
+# 保留原 Mixin 导入以维持向后兼容
 from .background import BackgroundMixin
 from .tall_decor import TallDecorMixin
 from .clustering import ClusteringMixin
@@ -30,18 +38,13 @@ from .rendering import RenderingMixin
 from .reclassify import ReclassifyMixin
 
 
-class DOMRestructure(
-    BackgroundMixin,
-    TallDecorMixin,
-    ClusteringMixin,
-    RenderingMixin,
-    ReclassifyMixin,
-):
+class DOMRestructure:
     """DOM 重构转换器
 
     入口：``restructure_dom()``
 
     对每个 ``layer-group`` 递归做空间聚类，并把结果写回 soup 和 css_rules。
+    使用 Handler 组合模式替代 Mixin 继承。
     """
 
     def __init__(
@@ -67,6 +70,13 @@ class DOMRestructure(
         self.config = ClusterConfig()
         self._virtual_seq = 0
 
+        # 初始化 Handler 组合
+        self.background = BackgroundHandler(self)
+        self.tall_decor = TallDecorHandler(self)
+        self.clustering = ClusteringHandler(self)
+        self.rendering = RenderingHandler(self)
+        self.reclassify = ReclassifyHandler(self)
+
     # ------------------------------------------------------------------
     # Public entry
     # ------------------------------------------------------------------
@@ -86,7 +96,7 @@ class DOMRestructure(
                 traceback.print_exc()
 
         if self.config.enable_container_bg_absorb_pass:
-            self._absorb_container_backgrounds_pass()
+            self.reclassify.absorb_container_backgrounds_pass()
 
     # ------------------------------------------------------------------
     # 收集所有 group
@@ -137,7 +147,7 @@ class DOMRestructure(
 
             name = group.get('data-name', 'unknown')
 
-            absorbed_leaves = self._absorb_normal_backgrounds(group, tree)
+            absorbed_leaves = self.background.absorb_normal_backgrounds(group, tree)
 
             if absorbed_leaves:
                 tree.children = [
@@ -170,7 +180,7 @@ class DOMRestructure(
                 for leaf in remaining_leaves:
                     leaf.element.extract()
 
-                self._apply_flex_to_existing_container(group, fg)
+                self.rendering.apply_flex_to_existing_container(group, fg)
 
                 root_kind = fg.kind
                 if root_kind == 'row':
@@ -186,7 +196,7 @@ class DOMRestructure(
                         child_elem = child_tree.leaf.element
                         child_css_class = child_tree.leaf.css_class
                     else:
-                        child_elem = self._render_tree(
+                        child_elem = self.rendering.render_tree(
                             child_tree, parent_origin=fg.bbox)
                         virtual_class = child_elem.get('class', [])
                         child_css_class = (
@@ -195,7 +205,7 @@ class DOMRestructure(
                     child_position = (
                         'relative' if child_tree.kind == 'stack' else 'static'
                     )
-                    self._apply_flex_child_margins(
+                    self.rendering.apply_flex_child_margins(
                         child_css_class,
                         child_bbox=child_tree.bbox,
                         parent_bbox=fg.bbox,
@@ -220,7 +230,7 @@ class DOMRestructure(
             for leaf in remaining_leaves:
                 leaf.element.extract()
 
-            self._apply_stack_to_existing_container(group, tree)
+            self.rendering.apply_stack_to_existing_container(group, tree)
 
             for child_tree in tree.children:
                 if child_tree.kind == 'leaf':
@@ -234,7 +244,7 @@ class DOMRestructure(
                         styles.pop(k, None)
                     group.append(leaf.element)
                 else:
-                    child_elem = self._render_tree(child_tree, parent_origin=tree.bbox)
+                    child_elem = self.rendering.render_tree(child_tree, parent_origin=tree.bbox)
                     sub_classes = child_elem.get('class', [])
                     if sub_classes:
                         sub_css_class = f'.{sub_classes[0]}'
@@ -255,7 +265,7 @@ class DOMRestructure(
         for leaf in leaves:
             leaf.element.extract()
 
-        self._apply_flex_to_existing_container(group, tree)
+        self.rendering.apply_flex_to_existing_container(group, tree)
 
         root_kind = tree.kind
         if root_kind == 'row':
@@ -269,13 +279,13 @@ class DOMRestructure(
                 child_elem = child_tree.leaf.element
                 child_css_class = child_tree.leaf.css_class
             else:
-                child_elem = self._render_tree(child_tree, parent_origin=tree.bbox)
+                child_elem = self.rendering.render_tree(child_tree, parent_origin=tree.bbox)
                 virtual_class = child_elem.get('class', [])
                 child_css_class = f".{virtual_class[0]}" if virtual_class else None
 
             child_position = 'relative' if child_tree.kind == 'stack' else 'static'
 
-            self._apply_flex_child_margins(
+            self.rendering.apply_flex_child_margins(
                 child_css_class,
                 child_bbox=child_tree.bbox,
                 parent_bbox=tree.bbox,
@@ -349,21 +359,21 @@ class DOMRestructure(
 
         # 改进：先提取装饰层（在背景还存在的完整集合上），避免背景对中位数的影响
         # 这样装饰层提取的条件更稳定、更一致
-        decor_leaves_initial, remaining_initial = self._extract_tall_decor_leaves(leaves)
+        decor_leaves_initial, remaining_initial = self.tall_decor.extract_tall_decor_leaves(leaves)
         
         # 如果有装饰层被提取，基于剩余元素做背景剥离
         work_leaves = remaining_initial if decor_leaves_initial else leaves
         
-        bg_leaves, fg_leaves = self._extract_background_leaves(work_leaves)
+        bg_leaves, fg_leaves = self.background.extract_leaves(work_leaves)
         if bg_leaves and len(fg_leaves) >= 1:
             fg_tree = self._build_tree_without_bg(fg_leaves)
             if fg_tree.kind in ('row', 'col'):
                 envelope = self._envelope([l.bbox for l in leaves])
-                children = [self._leaf_to_node(bg) for bg in bg_leaves]
+                children = [self.clustering._leaf_to_node(bg) for bg in bg_leaves]
                 children.append(fg_tree)
                 # 如果初始有装饰层，也加进来
                 if decor_leaves_initial:
-                    children = [self._leaf_to_node(d) for d in decor_leaves_initial] + children
+                    children = [self.clustering._leaf_to_node(d) for d in decor_leaves_initial] + children
                 return LayoutNode(
                     kind='stack',
                     bbox=envelope,
@@ -372,15 +382,15 @@ class DOMRestructure(
 
         # 如果初始提取的装饰层存在，且剩余前景可以聚类成row/col
         if decor_leaves_initial and len(remaining_initial) >= 2:
-            fg_tree = self._cluster(remaining_initial) if not self._is_stack_group(
+            fg_tree = self.clustering.cluster(remaining_initial) if not self.clustering.is_stack_group(
                 [l.bbox for l in remaining_initial]) else LayoutNode(
                     kind='stack',
                     bbox=self._envelope([l.bbox for l in remaining_initial]),
-                    children=[self._leaf_to_node(l) for l in remaining_initial],
+                    children=[self.clustering._leaf_to_node(l) for l in remaining_initial],
                 )
             if fg_tree.kind in ('row', 'col'):
                 envelope = self._envelope([l.bbox for l in leaves])
-                children = [self._leaf_to_node(d) for d in decor_leaves_initial]
+                children = [self.clustering._leaf_to_node(d) for d in decor_leaves_initial]
                 children.append(fg_tree)
                 return LayoutNode(
                     kind='stack',
@@ -388,14 +398,14 @@ class DOMRestructure(
                     children=children,
                 )
 
-        if self._is_stack_group([l.bbox for l in leaves]):
+        if self.clustering.is_stack_group([l.bbox for l in leaves]):
             return LayoutNode(
                 kind='stack',
                 bbox=self._envelope([l.bbox for l in leaves]),
-                children=[self._leaf_to_node(l) for l in leaves],
+                children=[self.clustering._leaf_to_node(l) for l in leaves],
             )
 
-        return self._cluster(leaves)
+        return self.clustering.cluster(leaves)
 
     def _build_tree_without_bg(self, leaves: List[LeafInfo]) -> LayoutNode:
         """构建前景 leaves 的布局树（不再递归做背景剥离，也不再做装饰层提取，因为已在上层做过）"""
@@ -403,14 +413,14 @@ class DOMRestructure(
             leaf = leaves[0]
             return LayoutNode(kind='leaf', bbox=leaf.bbox, leaf=leaf)
 
-        if self._is_stack_group([l.bbox for l in leaves]):
+        if self.clustering.is_stack_group([l.bbox for l in leaves]):
             return LayoutNode(
                 kind='stack',
                 bbox=self._envelope([l.bbox for l in leaves]),
-                children=[self._leaf_to_node(l) for l in leaves],
+                children=[self.clustering._leaf_to_node(l) for l in leaves],
             )
 
-        return self._cluster(leaves)
+        return self.clustering.cluster(leaves)
 
     # ------------------------------------------------------------------
     # 工具
