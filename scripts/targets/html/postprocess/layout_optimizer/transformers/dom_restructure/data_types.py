@@ -118,7 +118,7 @@ class ClusterConfig:
     # 的聚类结果中 image leaf 未被 _extract_background_leaves 剥离（例如
     # 它作为 stack 的普通成员被保留），但事实上是该容器的整体背景。
     # ------------------------------------------------------------------
-    enable_container_bg_absorb_pass: bool = True
+    enable_container_bg_absorb_pass: bool = False
     # 候选 leaf 的宽/高覆盖父容器比例阈值
     container_bg_cover_ratio: float = 0.95
     # 候选 leaf 允许的四边溢出像素（相对父容器 bbox）

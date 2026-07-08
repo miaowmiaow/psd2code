@@ -478,12 +478,19 @@ class CssDedup:
             if rule is None:
                 continue
             
-            # 尝试从子元素找最小 z-index
-            child_min_z = self._find_children_min_z_index(sel)
-            if child_min_z is not None:
-                target = child_min_z
-            else:
+            # 尝试从子元素找最小 z-index。
+            # 但对 v-* wrapper 不能直接继承子最小 z：
+            # 例如子树里有 323，会把 wrapper 自己抬到 323，
+            # 进而压住同层级本该在其上的普通节点（真实案例：首屏标题被盖住）。
+            # v-* 只需要维持同层 DOM 顺序，因此统一用 cursor+1。
+            if self._is_virtual_wrapper_selector(sel):
                 target = cursor + 1
+            else:
+                child_min_z = self._find_children_min_z_index(sel)
+                if child_min_z is not None:
+                    target = child_min_z
+                else:
+                    target = cursor + 1
             
             cursor = max(cursor, target)
             rule['z-index'] = str(target)

@@ -164,10 +164,19 @@ class SemanticClassRename:
         alias_map: Dict[str, str] = {}  # old_class → new_class
 
         for base, old_classes in base_to_old_classes.items():
-            for idx, old in enumerate(old_classes):
-                new_name = self._allocate_name(base, idx, reserved)
-                alias_map[old] = new_name
-                reserved.add(new_name)
+            # ⚠️ 检查同 base 的多个类是否有不同的样式
+            # 如果有不同的非定位属性，则分别分配不同的名字（否则会丢失样式）
+            distinct_classes = self._group_by_properties(old_classes)
+            
+            # distinct_classes 是列表 [[ old_class, ... ], [ old_class, ... ], ...]
+            # 每个子列表内的类具有相同的非定位属性
+            idx = 0
+            for group in distinct_classes:
+                for old in group:
+                    new_name = self._allocate_name(base, idx, reserved)
+                    alias_map[old] = new_name
+                    reserved.add(new_name)
+                idx += 1
 
         # 3) 改写 css_rules（保持插入顺序 → CssPretty 的 DOM 序仍按元素顺序）。
         self._rewrite_css_rules(alias_map)
@@ -192,6 +201,47 @@ class SemanticClassRename:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    
+    def _group_by_properties(self, old_classes: List[str]) -> List[List[str]]:
+        """按非定位属性分组同 base 的多个类。
+        
+        目的：防止有不同样式（background、color、font-size 等）的类被映射到同一个新名
+        （这样会导致样式丢失或混淆）。
+        
+        返回：[[old_class, ...], [old_class, ...], ...]
+              同一子列表内的类有相同的非定位属性
+        """
+        _POSITION_PROPS = {'position', 'left', 'top', 'right', 'bottom', 'z-index', 
+                          'width', 'height'}  # width/height 不算定位属性
+        
+        # 构建每个类的非定位属性签名
+        class_signatures = {}
+        for old_cls in old_classes:
+            sel = f".{old_cls}"
+            props = self.css_rules.get(sel, {})
+            
+            # 提取非定位属性，生成不可变签名（用于分组）
+            non_pos_props = {
+                k: v for k, v in props.items()
+                if k not in _POSITION_PROPS
+            }
+            # 将字典转换为有序的元组以支持 set/dict 操作
+            sig = tuple(sorted((k, v) for k, v in non_pos_props.items()))
+            class_signatures[old_cls] = sig
+        
+        # 按签名分组
+        sig_to_group = {}
+        result_order = []  # 保持原始顺序
+        for old_cls in old_classes:
+            sig = class_signatures[old_cls]
+            if sig not in sig_to_group:
+                sig_to_group[sig] = []
+                result_order.append(sig)
+            sig_to_group[sig].append(old_cls)
+        
+        # 按原始顺序返回分组
+        result = [sig_to_group[sig] for sig in result_order]
+        return result
 
     @staticmethod
     def _allocate_name(base: str, idx: int, reserved: Set[str]) -> str:

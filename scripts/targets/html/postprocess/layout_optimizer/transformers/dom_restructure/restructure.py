@@ -98,16 +98,61 @@ class DOMRestructure:
         if self.config.enable_container_bg_absorb_pass:
             self.reclassify.absorb_container_backgrounds_pass()
 
+    def _safe_extract(self, elem) -> bool:
+        """安全删除元素：如果有子元素则保留，否则删除
+        
+        避免删除容器时连同其子元素一起删除的问题。
+        
+        返回值：True 表示真的删除了，False 表示因为有子元素而保留了
+        """
+        if not elem:
+            return True
+        
+        # 找出所有直接子 div
+        children = [c for c in elem.find_all(recursive=False) if c.name == 'div']
+        
+        if children:
+            # 有子元素：保留容器，不删除
+            # （这是有内容的容器，不应该被删除）
+            return False
+        
+        # 无子元素：正常删除
+        elem.extract()
+        return True
+
     # ------------------------------------------------------------------
     # 收集所有 group
     # ------------------------------------------------------------------
 
     def _collect_all_groups(self) -> List:
-        """按 DOM 文档顺序收集所有 layer-group 元素"""
-        return self.soup.find_all(
-            'div',
-            class_=lambda x: x and 'layer-group' in str(x),
-        )
+        """按 DOM 文档顺序收集可参与聚类的容器。
+
+        默认包含：
+        - ``layer-group``
+
+        额外包含：
+        - ``data-type=image`` 且存在直接子 ``div`` 的 image 容器
+
+        说明：仅放开"有直接子节点"的 image，避免把普通图片叶子层误当容器。
+        """
+        candidates = self.soup.find_all('div')
+        result: List = []
+        for elem in candidates:
+            classes = elem.get('class', [])
+            is_layer_group = 'layer-group' in classes
+
+            is_image_container = (
+                elem.get('data-type') == 'image'
+                and any(
+                    getattr(c, 'name', None) == 'div'
+                    for c in elem.find_all(recursive=False)
+                )
+            )
+
+            if is_layer_group or is_image_container:
+                result.append(elem)
+
+        return result
 
     # ------------------------------------------------------------------
     # 处理单个 group
@@ -130,10 +175,28 @@ class DOMRestructure:
         if len(leaves) < self.config.min_children_to_cluster:
             return
 
+        # 保护：若子层明显越出父容器边界（常见于标题贴片/角标负偏移），
+        # 强行 row/col 化会丢失负偏移语义，导致整体下沉/错位。
+        # 该类组保持 absolute 更稳妥。
+        fallback_bbox = self._envelope([l.bbox for l in leaves])
+        container_bbox = self._container_css_bbox(group, fallback=fallback_bbox)
+        if self._has_significant_overflow(leaves, container_bbox):
+            name = group.get('data-name', 'unknown')
+            print(f"    ⏭ {name}: 子层越界明显，保持 absolute")
+            return
+
         tree = self._build_tree(leaves)
 
         if tree.kind == 'leaf':
             return
+
+        # 纯图片装饰组优先保守：避免把重叠装饰误改成 flex 后出现层级错乱。
+        if tree.kind in ('row', 'col'):
+            image_only = all((l.data_type or '') == 'image' for l in leaves)
+            if image_only and not self._can_flex_applier_handle(group):
+                name = group.get('data-name', 'unknown')
+                print(f"    ⏭ {name}: 纯图片装饰组，保持 absolute")
+                return
 
         if tree.kind == 'stack':
             has_flex_subtree = any(c.kind in ('row', 'col') for c in tree.children)
@@ -155,8 +218,13 @@ class DOMRestructure:
                     if not (c.kind == 'leaf' and c.leaf in absorbed_leaves)
                 ]
                 for leaf in absorbed_leaves:
-                    leaf.element.extract()
-                    self.css_rules.pop(leaf.css_class, None)
+                    # 只有真的删除了才删除 CSS 规则
+                    if self._safe_extract(leaf.element):
+                        # ✅ 核心修复：只删除装饰性背景的 CSS，保留内容元素（text）的 CSS
+                        # 理由：text 等内容元素的 CSS 规则会被后续转换器使用，
+                        # 无条件删除会导致 font-size、color 等属性丢失
+                        if leaf.data_type in ('image', 'layer-group'):
+                            self.css_rules.pop(leaf.css_class, None)
                     
                     # 删除孤立的全局 class 规则
                     # 当某个具体类（如 .img__50）被删除时，需要检查是否有相关的全局类
@@ -178,7 +246,13 @@ class DOMRestructure:
                 print(f"    ✓ {name}: 背景吸收 → flex {summary}{absorbed_info}")
 
                 for leaf in remaining_leaves:
-                    leaf.element.extract()
+                    # 删除时检查是否有 CSS 需要清理
+                    if self._safe_extract(leaf.element):
+                        # ✅ 核心修复：remaining_leaves 中的元素不是被吸收的背景，
+                        # 而是参与 flex 布局的元素。这些元素的 CSS 应该被保留，
+                        # 以便 flex 转换器能够正确处理它们的样式。
+                        # 不删除任何 CSS 规则。
+                        pass
 
                 self.rendering.apply_flex_to_existing_container(group, fg)
 
@@ -228,7 +302,13 @@ class DOMRestructure:
                 l for l in leaves if l not in absorbed_leaves
             ]
             for leaf in remaining_leaves:
-                leaf.element.extract()
+                # 删除时检查是否有 CSS 需要清理
+                if self._safe_extract(leaf.element):
+                    # ✅ 核心修复：remaining_leaves 中的元素不是被吸收的背景，
+                    # 而是参与 stack 布局的元素。这些元素的 CSS 应该被保留，
+                    # 以便后续转换器能够正确处理它们的样式。
+                    # 不删除任何 CSS 规则。
+                    pass
 
             self.rendering.apply_stack_to_existing_container(group, tree)
 
@@ -237,8 +317,10 @@ class DOMRestructure:
                     leaf = child_tree.leaf
                     styles = self.css_rules.setdefault(leaf.css_class, {})
                     styles['position'] = 'absolute'
-                    styles['left'] = f'{int(round(leaf.bbox.left - tree.bbox.left))}px'
-                    styles['top'] = f'{int(round(leaf.bbox.top - tree.bbox.top))}px'
+                    # stack 写回已有容器时，子层坐标应直接相对容器原点，
+                    # 不能再减去 tree.bbox（否则会依赖容器 padding 才能复位）。
+                    styles['left'] = f'{int(round(leaf.bbox.left))}px'
+                    styles['top'] = f'{int(round(leaf.bbox.top))}px'
                     for k in ('margin', 'margin-left', 'margin-top',
                               'margin-right', 'margin-bottom'):
                         styles.pop(k, None)
@@ -250,8 +332,9 @@ class DOMRestructure:
                         sub_css_class = f'.{sub_classes[0]}'
                         sub_styles = self.css_rules.setdefault(sub_css_class, {})
                         sub_styles['position'] = 'absolute'
-                        sub_styles['left'] = f'{int(round(child_tree.bbox.left - tree.bbox.left))}px'
-                        sub_styles['top'] = f'{int(round(child_tree.bbox.top - tree.bbox.top))}px'
+                        # 同上：保持相对 group 原点的真实偏移。
+                        sub_styles['left'] = f'{int(round(child_tree.bbox.left))}px'
+                        sub_styles['top'] = f'{int(round(child_tree.bbox.top))}px'
                         for k in ('margin', 'margin-left', 'margin-top',
                                   'margin-right', 'margin-bottom'):
                             sub_styles.pop(k, None)
@@ -348,6 +431,27 @@ class DOMRestructure:
                     pass
         return fallback
 
+    @staticmethod
+    def _has_significant_overflow(
+        leaves: List[LeafInfo],
+        container_bbox: "BBox",
+        tolerance: float = 4.0,
+    ) -> bool:
+        """判断是否存在明显越界子层。
+
+        仅把超过容忍阈值的越界视作风险，避免 1~2px 误差触发保守分支。
+        """
+        for leaf in leaves:
+            b = leaf.bbox
+            if (
+                b.left < container_bbox.left - tolerance
+                or b.top < container_bbox.top - tolerance
+                or b.right > container_bbox.right + tolerance
+                or b.bottom > container_bbox.bottom + tolerance
+            ):
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 构建布局树
     # ------------------------------------------------------------------
@@ -367,18 +471,20 @@ class DOMRestructure:
         bg_leaves, fg_leaves = self.background.extract_leaves(work_leaves)
         if bg_leaves and len(fg_leaves) >= 1:
             fg_tree = self._build_tree_without_bg(fg_leaves)
-            if fg_tree.kind in ('row', 'col'):
-                envelope = self._envelope([l.bbox for l in leaves])
-                children = [self.clustering._leaf_to_node(bg) for bg in bg_leaves]
-                children.append(fg_tree)
-                # 如果初始有装饰层，也加进来
-                if decor_leaves_initial:
-                    children = [self.clustering._leaf_to_node(d) for d in decor_leaves_initial] + children
-                return LayoutNode(
-                    kind='stack',
-                    bbox=envelope,
-                    children=children,
-                )
+            # 只要识别出背景层，就优先保留 "stack(bg + fg_tree)" 语义。
+            # 之前仅在 fg_tree 为 row/col 时才回包 stack，导致 fg_tree=stack 场景
+            # 会退化回全量重聚类，把大背景误卷入 col/row，进而出现前景被底图盖住。
+            envelope = self._envelope([l.bbox for l in leaves])
+            children = [self.clustering._leaf_to_node(bg) for bg in bg_leaves]
+            children.append(fg_tree)
+            # 如果初始有装饰层，也加进来
+            if decor_leaves_initial:
+                children = [self.clustering._leaf_to_node(d) for d in decor_leaves_initial] + children
+            return LayoutNode(
+                kind='stack',
+                bbox=envelope,
+                children=children,
+            )
 
         # 如果初始提取的装饰层存在，且剩余前景可以聚类成row/col
         if decor_leaves_initial and len(remaining_initial) >= 2:

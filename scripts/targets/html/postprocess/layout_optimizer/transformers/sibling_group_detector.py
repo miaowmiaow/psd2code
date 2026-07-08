@@ -605,16 +605,18 @@ class SiblingGroupDetector:
         wrapper_css['box-sizing'] = 'border-box'
 
         # ---- 5. 改写每个 item 的 CSS ----
+        # ⚠️ 关键：只删除定位属性（position/left/top），保留 width/height 和所有其他属性
+        # （background/color/font-size 等必须保留，否则元素样式会丢失）
+        _POSITION_ONLY_PROPS = {'position', 'left', 'top'}
         for it in items:
             item_css = self.css_rules.get(f'.{it.css_class}')
             if item_css is None:
                 continue
-            # 去掉绝对定位字段
-            item_css.pop('position', None)
-            item_css.pop('left', None)
-            item_css.pop('top', None)
-            # width / height 保留（item 自己的尺寸）
-            # z-index 保留也无害（flex item 默认 z-index 不冲突）
+            # 只删除绝对定位必需的三个属性
+            for prop in _POSITION_ONLY_PROPS:
+                item_css.pop(prop, None)
+            # width / height / z-index / color / font-size 等所有其他属性原样保留
+            # 这是注释第 46 行承诺的"其它属性原样保留"
 
         # ---- 6. 统计 ----
         self.stats['sibling_lists_created'] += 1

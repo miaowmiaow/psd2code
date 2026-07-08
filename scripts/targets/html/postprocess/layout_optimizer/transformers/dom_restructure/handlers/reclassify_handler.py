@@ -139,8 +139,27 @@ class ReclassifyHandler(DOMHandler):
             return []
 
         for leaf in absorbed:
-            leaf.element.extract()
-            self.owner.css_rules.pop(leaf.css_class, None)
+            # 安全删除：如果有子元素则保留，否则删除
+            deleted = False
+            if leaf.element:
+                children_divs = [
+                    c for c in leaf.element.find_all(recursive=False)
+                    if getattr(c, 'name', None) == 'div'
+                ]
+                if not children_divs:
+                    # 无子元素，可以安全删除
+                    leaf.element.extract()
+                    deleted = True
+                # 有子元素，保留容器（不删除CSS）
+            else:
+                leaf.element.extract()
+                deleted = True
+            
+            # 只有真的删除了才删除 CSS 规则
+            if deleted:
+                # ✅ 核心修复：只删除装饰性背景的 CSS，保留内容元素的 CSS
+                if leaf.data_type in ('image', 'layer-group'):
+                    self.owner.css_rules.pop(leaf.css_class, None)
 
         return absorbed
 

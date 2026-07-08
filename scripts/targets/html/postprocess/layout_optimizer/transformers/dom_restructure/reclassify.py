@@ -115,6 +115,17 @@ class ReclassifyMixin:
                     leaf.bbox.right > cw + overflow_tol or
                     leaf.bbox.bottom > ch + overflow_tol):
                 continue
+            
+            # 修复：排除有子元素的背景层（否则删除时会丢失子元素）
+            if leaf.element:
+                has_children = any(
+                    getattr(c, 'name', None) == 'div'
+                    for c in leaf.element.find_all(recursive=False)
+                )
+                if has_children:
+                    # 有子元素，不吸收，保留原有结构
+                    continue
+            
             candidates.append((leaf, styles))
 
         if not candidates:
@@ -150,8 +161,22 @@ class ReclassifyMixin:
             return []
 
         for leaf in absorbed:
+            # 修复：如果有子元素，先提升到父级再删除
+            if leaf.element:
+                children_divs = [
+                    c for c in leaf.element.find_all(recursive=False)
+                    if getattr(c, 'name', None) == 'div'
+                ]
+                if children_divs:
+                    # 逆序提升以保持原有顺序
+                    for child in reversed(children_divs):
+                        child.extract()
+                        leaf.element.insert_after(child)
+            
             leaf.element.extract()
-            self.css_rules.pop(leaf.css_class, None)
+            # ✅ 核心修复：只删除装饰性背景的 CSS，保留内容元素的 CSS
+            if leaf.data_type in ('image', 'layer-group'):
+                self.css_rules.pop(leaf.css_class, None)
 
         return absorbed
 

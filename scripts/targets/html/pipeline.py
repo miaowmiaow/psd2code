@@ -161,6 +161,87 @@ class HtmlCodegenStage(Stage):
 
 
 # ---------------------------------------------------------------------------
+# Stage 3.5: Background Nesting Restructure — 背景图层嵌套重组
+# ---------------------------------------------------------------------------
+
+class BgNestingRestructureStage(Stage):
+    """识别背景图层并将同级兄弟元素拉入背景图层内部
+    
+    流程：
+    1. 识别全覆盖背景图层（90% 覆盖 + image/layer-group 类型）
+    2. 构建背景图层间的嵌套关系
+    3. 将其他元素按包含关系拉入对应的背景图层
+    4. 添加 data-bg-nested 标记
+    5. 保存修改后的 HTML
+    
+    输入：HtmlCodegenStage 生成的 index.html
+    输出：修改后的 index.html（已重组背景图层）
+    """
+    
+    name = "bg_nesting_restructure"
+    
+    def run(self, ctx: PipelineContext) -> PipelineContext:
+        from targets.html.postprocess.bg_nesting_restructure import restructure_by_bg_nesting  # type: ignore
+        
+        html_path = ctx.get("html_path")
+        if not html_path:
+            ctx.log("bg_nesting_restructure: skipped (no html_path)")
+            return ctx
+        
+        html_path = Path(html_path)
+        if not html_path.exists():
+            ctx.log("bg_nesting_restructure: skipped (html not found)")
+            return ctx
+        
+        try:
+            from common.css_utils import (  # type: ignore
+                dict_to_css,
+                extract_global_css_header,
+                parse_css_to_dict,
+            )
+
+            print("\n🔄 应用背景图层嵌套重组...")
+
+            # 读取 HTML 和 CSS
+            html_content = html_path.read_text(encoding="utf-8")
+            css_path = html_path.parent / "style.css"
+
+            css_content = ""
+            css_header = ""
+            css_rules: dict[str, dict[str, str]] | None = None
+            if css_path.exists():
+                css_content = css_path.read_text(encoding="utf-8")
+                css_header = extract_global_css_header(css_content)
+                css_rules = parse_css_to_dict(css_content)
+
+            # 执行背景图层嵌套重组（HTML + CSS 规则联动）
+            restructured_html = restructure_by_bg_nesting(
+                html_content,
+                css_content=css_content,
+                css_rules=css_rules,
+                debug=False,
+            )
+
+            # 写回 HTML
+            html_path.write_text(restructured_html, encoding="utf-8")
+
+            # 写回 CSS（如果存在）
+            if css_path.exists() and css_rules is not None:
+                css_path.write_text(
+                    dict_to_css(css_rules, header=css_header),
+                    encoding="utf-8",
+                )
+
+            ctx.log(f"✅ 背景图层嵌套重组完成: {html_path}")
+            return ctx
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"❌ 背景图层嵌套重组失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return ctx
+
+
+# ---------------------------------------------------------------------------
 # Stage 4: Pre-optimize Prune — 基于 index.html 剔除被遮挡 / 全透明图层
 # ---------------------------------------------------------------------------
 
@@ -415,6 +496,15 @@ class LayoutOptimizeStage(Stage):
 
         css_opt_path.write_text(css_text, encoding="utf-8")
 
+        # 避免预览器缓存旧 CSS 导致“新 HTML + 旧 CSS”错配。
+        import hashlib as _hashlib
+        css_version = _hashlib.md5(css_text.encode("utf-8")).hexdigest()[:8]
+        html_opt = html_opt.replace(
+            'href="style_optimized.css"',
+            f'href="style_optimized.css?v={css_version}"',
+        )
+        html_opt_path.write_text(html_opt, encoding="utf-8")
+
         print(f"✅ 布局优化完成！")
         print(f"   原始版本: {html_path}")
         print(f"   优化版本: {html_opt_path}")
@@ -523,6 +613,7 @@ def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
         LoadPsdStage(),
         ParseToIrStage(),
         HtmlCodegenStage(),
+        BgNestingRestructureStage(),  # 背景图层嵌套重组（在优化前）
         PrunePreOptimizeStage(),
         LayoutOptimizeStage(),
         BackgroundLayerAbsorptionStage(),

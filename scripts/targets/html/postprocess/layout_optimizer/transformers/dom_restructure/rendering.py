@@ -144,8 +144,9 @@ class RenderingMixin:
             styles.pop(k, None)
 
         if flex_kind == 'row':
-            origin_left = max(0.0, parent_bbox.left)
-            origin_top = max(0.0, parent_bbox.top)
+            # 不能把负偏移截断到 0：否则父层和子层会重复吃到同一负偏移。
+            origin_left = parent_bbox.left
+            origin_top = parent_bbox.top
             if prev_bbox is None:
                 main_gap = child_bbox.left - origin_left
             else:
@@ -157,8 +158,9 @@ class RenderingMixin:
             if abs(cross_offset) > 0.5:
                 styles['margin-top'] = f'{int(round(cross_offset))}px'
         else:  # col
-            origin_left = max(0.0, parent_bbox.left)
-            origin_top = max(0.0, parent_bbox.top)
+            # 不能把负偏移截断到 0：否则父层和子层会重复吃到同一负偏移。
+            origin_left = parent_bbox.left
+            origin_top = parent_bbox.top
             if prev_bbox is None:
                 main_gap = child_bbox.top - origin_top
             else:
@@ -218,6 +220,14 @@ class RenderingMixin:
         current_pos = (styles.get('position') or '').strip().lower()
         if current_pos not in ('absolute', 'fixed', 'relative', 'sticky'):
             styles['position'] = 'relative'
+
+        # stack 根容器的子层一律 absolute；padding 对 absolute 子层不生效，
+        # 反而会让坐标系语义混乱（例如文本层整体上飘）。
+        # 因此这里不再通过 padding 传递 tree.bbox 偏移，
+        # 偏移由上层在写入子层 left/top 时直接表达。
+        styles.pop('box-sizing', None)
+        styles.pop('padding-left', None)
+        styles.pop('padding-top', None)
 
         marker = 'v-stack'
         if marker not in classes:

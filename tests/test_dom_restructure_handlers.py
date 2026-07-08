@@ -10,6 +10,7 @@
 from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 import pytest
 
 from targets.html.postprocess.layout_optimizer.transformers.dom_restructure import (
@@ -293,6 +294,72 @@ class TestRenderingHandler:
         # 验证在 css_rules 中创建了样式
         assert len(dr.css_rules) >= 0  # 验证方法执行无错误
 
+    def test_apply_flex_child_margins_row_negative_parent_origin(self):
+        """row 首子项：父 bbox 为负时，不应重复写负偏移"""
+        dr = _make_dom_restructure()
+        dr.css_rules[".child"] = {
+            "left": "-2px",
+            "top": "-58px",
+            "width": "100px",
+            "height": "40px",
+            "position": "absolute",
+        }
+
+        dr.rendering.apply_flex_child_margins(
+            child_css_class=".child",
+            child_bbox=BBox(-2, -58, 98, -18),
+            parent_bbox=BBox(-2, -58, 300, 200),
+            prev_bbox=None,
+            flex_kind="row",
+        )
+
+        styles = dr.css_rules[".child"]
+        assert "margin-left" not in styles
+        assert "margin-top" not in styles
+
+    def test_apply_flex_child_margins_col_negative_parent_origin(self):
+        """col 首子项：父 bbox 为负时，不应重复写负偏移"""
+        dr = _make_dom_restructure()
+        dr.css_rules[".child"] = {
+            "left": "-3px",
+            "top": "-20px",
+            "width": "120px",
+            "height": "40px",
+            "position": "absolute",
+        }
+
+        dr.rendering.apply_flex_child_margins(
+            child_css_class=".child",
+            child_bbox=BBox(-3, -20, 117, 20),
+            parent_bbox=BBox(-3, -20, 320, 480),
+            prev_bbox=None,
+            flex_kind="col",
+        )
+
+        styles = dr.css_rules[".child"]
+        assert "margin-left" not in styles
+        assert "margin-top" not in styles
+
+    def test_apply_stack_to_existing_container_clears_padding(self):
+        """stack 根容器不应依赖 padding 传递偏移（子层 absolute 时会错位）"""
+        dr = _make_dom_restructure()
+        soup = BeautifulSoup('<div class="stack-root layer-group"></div>', 'html.parser')
+        group = soup.find('div')
+        dr.css_rules['.stack-root'] = {
+            'position': 'relative',
+            'padding-left': '11px',
+            'padding-top': '59px',
+            'box-sizing': 'border-box',
+        }
+
+        tree = LayoutNode(kind='stack', bbox=BBox(11, 59, 714, 1696), children=[])
+        dr.rendering.apply_stack_to_existing_container(group, tree)
+
+        styles = dr.css_rules['.stack-root']
+        assert 'padding-left' not in styles
+        assert 'padding-top' not in styles
+        assert 'box-sizing' not in styles
+
 
 # ============================================================================
 # ReclassifyHandler 测试
@@ -394,6 +461,22 @@ class TestHandlerIntegration:
         tree = dr._build_tree(leaves)
         assert tree is not None
 
+    def test_build_tree_keeps_stack_when_background_detected_and_fg_is_stack(self):
+        """识别出背景后，即便前景是 stack 也应保留 stack(bg+fg) 语义"""
+        dr = _make_dom_restructure()
+        # 两个前景刻意做成强重叠，令 fg_tree 走 stack
+        leaves = [
+            _make_leaf("bg", 0, 0, 1000, 1000, "image"),
+            _make_leaf("fg1", 100, 100, 300, 300, "image"),
+            _make_leaf("fg2", 120, 120, 300, 300, "image"),
+        ]
+
+        tree = dr._build_tree(leaves)
+        assert tree.kind == "stack"
+        # 期望结构是 [背景leaf, 前景子树]
+        assert len(tree.children) >= 2
+        assert tree.children[-1].kind in ("stack", "row", "col", "leaf")
+
 
 # ============================================================================
 # 性能测试
@@ -474,6 +557,26 @@ class TestEdgeCases:
         ]
         tree = dr._build_tree(leaves)
         assert tree is not None
+
+    def test_has_significant_overflow_true_on_negative_offset(self):
+        """明显负偏移应判定为越界（避免后续 flex 化错位）"""
+        dr = _make_dom_restructure()
+        leaves = [
+            _make_leaf("a", -10, -58, 100, 40),
+            _make_leaf("b", 243, -41, 359, 72),
+        ]
+        container = BBox(0, 0, 724, 1698)
+        assert dr._has_significant_overflow(leaves, container)
+
+    def test_has_significant_overflow_false_within_tolerance(self):
+        """轻微 1~2px 偏差不应触发越界保护"""
+        dr = _make_dom_restructure()
+        leaves = [
+            _make_leaf("a", -2, -1, 100, 40),
+            _make_leaf("b", 10, 10, 50, 50),
+        ]
+        container = BBox(0, 0, 200, 200)
+        assert not dr._has_significant_overflow(leaves, container)
 
     def test_very_large_coordinates(self):
         """极大坐标"""

@@ -296,6 +296,30 @@ class TestPruneZIndex:
         assert int(css[".c"]["z-index"]) > 5
         assert stats["z_index_filled"] > 0
 
+    def test_mixed_state_virtual_wrapper_not_inherit_descendant_high_z(self):
+        """v-* wrapper 在 mixed 状态下不应继承子树高 z-index（避免跨层遮挡）"""
+        html = """
+        <div class="parent">
+          <div class="v-col-1">
+            <div class="inner-a"></div>
+          </div>
+          <div class="title"></div>
+        </div>
+        """
+        css = {
+            ".parent": {"position": "relative"},
+            ".v-col-1": {"width": "100px", "height": "100px"},  # auto
+            ".inner-a": {"z-index": "323", "position": "absolute"},
+            ".title": {"z-index": "21", "position": "absolute"},
+        }
+
+        _run_dedup(html, css)
+
+        # 修复前会把 v-col-1 补成 323，导致把同层 title 压住。
+        # 现在应仅按 DOM 顺序补一个较小值（通常是 0 或 1），不会抬到子树高度。
+        assert "z-index" in css[".v-col-1"]
+        assert int(css[".v-col-1"]["z-index"]) < 21
+
     def test_all_auto_no_descendant_z_no_action(self):
         """全部子 auto + 后代也无 z → 不做任何处理"""
         html = """

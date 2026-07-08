@@ -154,6 +154,13 @@ class BackgroundHandler(DOMHandler):
                     leaf.bbox.bottom > ch + overflow_tol):
                 continue
             
+            # 跳过有子元素的背景容器（保留其内容）
+            if leaf.element:
+                children = [c for c in leaf.element.find_all(recursive=False)
+                           if c.name == 'div']
+                if children:
+                    continue
+            
             candidates.append((leaf, styles))
 
         if not candidates:

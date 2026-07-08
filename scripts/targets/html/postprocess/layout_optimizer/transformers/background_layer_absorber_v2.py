@@ -325,12 +325,26 @@ def _perform_absorption(
             # 容器使用分散子属性形式，直接写 background-position
             container_rule["background-position"] = pos_str
     
-    # 从 HTML 中删除背景层元素
-    if bg_elem.parent:
-        bg_elem.decompose()
-    
-    stats["bg_layers_absorbed"] += 1
-    stats["bg_elements_removed"] += 1
+        # 从 HTML 中删除背景层元素
+        # 但首先检查是否有非背景子元素（防止删除时丢失内容）
+        has_content_children = False
+        if bg_elem:
+            for child in bg_elem.find_all(recursive=False):
+                if getattr(child, 'name', None) == 'div':
+                    has_content_children = True
+                    break
+        
+        if has_content_children:
+            # 有子元素，不删除，避免丢失内容
+            import sys
+            sys.stderr.write(f"⚠️  保留背景层（有子内容）: {bg_first_class}\n")
+        else:
+            # 无子元素，安全删除
+            if bg_elem and bg_elem.parent:
+                bg_elem.decompose()
+            
+            stats["bg_layers_absorbed"] += 1
+            stats["bg_elements_removed"] += 1
 
 
 def _merge_absorb_css_rules(

@@ -778,6 +778,13 @@ class OccludedLayerPruner:
             if (rule.get('position') or '').strip() != 'absolute':
                 continue
 
+            # 安全闸门：父容器若自带背景图，不做 envelope 收缩。
+            # 否则会出现“容器被收缩，但背景图仍是原尺寸”导致显示错位。
+            bg_img_val = rule.get('background-image') or ''
+            bg_shorthand_val = rule.get('background') or ''
+            if _URL_RE.search(str(bg_img_val)) or _URL_RE.search(str(bg_shorthand_val)):
+                continue
+
             # 当前父容器自身 bbox
             p_left = self._parse_px(rule.get('left'))
             p_top = self._parse_px(rule.get('top'))

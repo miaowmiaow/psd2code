@@ -413,6 +413,26 @@ class TestShrinkParentsToChildrenEnvelope:
         pruner._shrink_parents_to_children_envelope([parent_elem])
         assert css['.empty-parent']['width'] == '200px'
 
+    def test_skip_parent_with_background_image(self):
+        """父容器自带背景图时，不应做 envelope 收缩（避免背景图尺寸失配）"""
+        parent_rule = {
+            'position': 'absolute', 'left': '0px', 'top': '0px',
+            'width': '750px', 'height': '1162px',
+            'background-image': 'url("images/batai-524ee3.png")',
+            'background-repeat': 'no-repeat',
+        }
+        child_rules = [
+            {'left': '51px', 'top': '533px', 'width': '568px', 'height': '306px'},
+        ]
+        pruner, parent_elem = self._make_parent_with_children(parent_rule, child_rules)
+        pruner._shrink_parents_to_children_envelope([parent_elem])
+
+        rule = pruner.css_rules['.parent-grp']
+        assert rule['left'] == '0px'
+        assert rule['top'] == '0px'
+        assert rule['width'] == '750px'
+        assert rule['height'] == '1162px'
+
 
 # ===========================================================================
 # _resolve_png

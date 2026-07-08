@@ -195,15 +195,72 @@ class RepeatClassUnifier:
             if not base:
                 remaining_groups.append(group)
                 continue
+            
+            # ⚠️ 检查成员的属性是否可合并：
+            # 1. 背景必须相同（否则合并会丢失不同背景）
+            # 2. 非定位属性必须完整（否则无法正确显示）
+            # 3. 非定位属性必须相同（否则合并会丢失样式）
+            
+            _POSITION_PROPS = {'position', 'left', 'top', 'right', 'bottom', 'z-index'}
+            
+            # 1) 检查背景是否一致
+            backgrounds = []
+            for sel in members:
+                props = self.css_rules.get(sel, {})
+                bg = props.get('background') or props.get('background-image', '')
+                backgrounds.append(bg)
+            
+            if len(set(backgrounds)) > 1:
+                # 背景不一致，跳过合并
+                remaining_groups.append(group)
+                continue
+            
+            # 2) 检查属性完整性：所有成员都必须有非定位属性
+            has_incomplete = False
+            for sel in members:
+                props = self.css_rules.get(sel, {})
+                non_position_props = set(props.keys()) - _POSITION_PROPS
+                if not non_position_props:
+                    # 只有位置属性，属性不完整
+                    has_incomplete = True
+                    break
+            
+            if has_incomplete:
+                remaining_groups.append(group)
+                continue
+            
+            # 3) 检查非定位属性是否相同（CssDedup 承诺相同，但为了保险再检查一次）
+            non_pos_props_list = []
+            for sel in members:
+                props = self.css_rules.get(sel, {})
+                non_pos_props = {
+                    k: v for k, v in props.items() 
+                    if k not in _POSITION_PROPS
+                }
+                non_pos_props_list.append(non_pos_props)
+            
+            # 检查是否所有成员的非定位属性都相同
+            first_props = non_pos_props_list[0]
+            for props in non_pos_props_list[1:]:
+                if props != first_props:
+                    # 非定位属性不一致，不应合并
+                    remaining_groups.append(group)
+                    has_incomplete = True
+                    break
+            
+            if has_incomplete:
+                continue
 
             unified_sel = self._allocate_unified(base, existing_selectors, used_unified)
 
             # 1) 改写 HTML：把成员类替换成 unified（首位）+ 移除其他 hash 类
             elements_changed = self._rewrite_html_classes(set(m[1:] for m in members), unified_sel[1:])
 
-            # 2) 改写 CSS：取首成员属性，新增 unified；删除原成员
-            # ✅ 修复：检查成员间是否有不同的 z-index，若有则保留最小值
-            unified_props = dict(self.css_rules[members[0]])
+            # 2) 改写 CSS：取属性最完整的成员作为基础，新增 unified；删除原成员
+            # 注意：CssDedup 承诺组内属性\"逐字相等\"，但考虑到可能的不完整性，
+            # 我们选择属性最多的那个作为基础，确保合并后的类不会丢失属性。
+            best_member = max(members, key=lambda sel: len(self.css_rules.get(sel, {})))
+            unified_props = dict(self.css_rules[best_member])
             z_values = []
             for sel in members:
                 z_str = self.css_rules[sel].get('z-index')
