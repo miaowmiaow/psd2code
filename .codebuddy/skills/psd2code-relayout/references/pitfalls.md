@@ -82,3 +82,48 @@ grid 默认 `align-items: stretch`，会把矮格拉到行高；改成 `start` �
 
 页面高度 6778px，远超视口。`page.screenshot(clip=..., full_page=True)` 时 clip 用**页面坐标**；不加 `full_page` 且 clip 超出视口会直接报错
 `Clipped area is either empty or outside the resulting image`。
+
+## 9. 图层合成要按 DOM 文档顺序，不是 z-index
+
+`z-index` 只在**同一层级**内比较；父子之间永远是「父先画、子后画」，与 z 值无关。
+
+实测（宝箱列）：
+
+| 图层 | box | z | 关系 |
+|---|---|---|---|
+| `prop-bg-18` | `[-5, 96, 140, 80]` | 103 | 底板 |
+| `btn-locked` | `[26, 120, 77, 31]` | 101 | **它的子元素** |
+
+按 z 排序会先画 `btn-locked`、再画底板 → 「待开启/领取」文字被底板盖住，整列差异 6,438 像素。
+
+改成按 `querySelectorAll` 的文档顺序（先序）叠放，差异降到 300 像素。
+
+## 10. 图层可能负坐标或超出列盒，画布要扩再裁
+
+宝箱列的底板是 `[-5, 96, 140, 80]`（左溢出 5px、右溢出 1px），图标是 `[5, -5, 122, 108]`（上溢出 5px）。
+
+直接按列尺寸建画布，`alpha_composite` 遇到负坐标会错位/丢内容。
+
+**正确做法**：
+
+```python
+min_x = min([0] + [l['x'] for l in layers]);  max_x = max([w] + [l['x']+l['w'] for l in layers])
+canvas = Image.new('RGBA', (max_x-min_x, max_y-min_y), (0,0,0,0))
+...   # 合成时坐标减去 min_x / min_y
+canvas = canvas.crop((-min_x, -min_y, -min_x+w, -min_y+h))   # 最后裁回列尺寸
+```
+
+## 11. 不要把整格截成不透明 PNG
+
+用 `page.screenshot(clip=格box)` 得到的是**含父容器底色**的不透明图。后果：
+
+- 背景被固化进图片，换肤/改底色就接不上；
+- 20 个格子存 20 份完整截图（450 KB），而实际只有 5 种；
+- 素材失去复用性（原产物里「南瓜」是一张复用的 `img-d83eb4.png`）。
+
+**正确做法**：逐层取原始 PNG + 透明画布合成，再按内容 hash 去重。实测同样 20 格：
+
+| 方案 | 张数 | 总大小 | 透明 |
+|---|---:|---:|---|
+| 整格截图 | 20 | 450 KB | 否 |
+| 逐层合成 + 去重 | **5** | **119 KB** | 是 |

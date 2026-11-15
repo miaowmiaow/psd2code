@@ -32,6 +32,30 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_LAYERS_JS = """(col) => {
+  const cr = col.getBoundingClientRect();
+  const layers = [];
+  [...col.querySelectorAll('div')].forEach((el, order) => {
+    const cs = getComputedStyle(el);
+    const bg = cs.backgroundImage;
+    if (!bg || bg === 'none') return;
+    const m = bg.match(/url\\(["']?([^"')]+)["']?\\)/);
+    if (!m) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
+    const idx = m[1].indexOf('/images/');
+    layers.push({
+      src: idx >= 0 ? m[1].slice(idx + 8) : m[1],
+      x: Math.round(r.left - cr.left),
+      y: Math.round(r.top - cr.top),
+      w: Math.round(r.width), h: Math.round(r.height),
+      z: parseInt(cs.zIndex, 10) || 0,
+      order,
+    });
+  });
+  return layers;
+}"""
+
 _COLLECT_JS = """(rowCls) => {
   const rows = [...document.querySelectorAll('.' + rowCls)];
   const out = [];
@@ -79,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--src', default='index_optimized.html')
     parser.add_argument('--src-css', default='style_optimized.css')
     parser.add_argument('--compare', action='store_true', help='重建后截新旧区域做像素对比')
+    parser.add_argument('--mode', choices=('compose', 'screenshot'), default='compose',
+                        help='compose=逐层取原始 PNG 合成透明底（推荐）；screenshot=整格截图')
     args = parser.parse_args(argv)
 
     try:
@@ -123,20 +149,74 @@ def main(argv: list[str] | None = None) -> int:
             row_classes[0],
         )
 
-        # 隐藏所有文本，截「纯图形」
-        page.evaluate("() => document.querySelectorAll('span').forEach(s => s.style.visibility='hidden')")
-        page.wait_for_timeout(200)
+        if args.mode == 'screenshot':
+            # 整格截图（含父容器背景，不透明）——仅用于快速比对，不推荐出品
+            page.evaluate(
+                "() => document.querySelectorAll('span').forEach(s => s.style.visibility='hidden')"
+            )
+            page.wait_for_timeout(200)
+            for ri, row in enumerate(rows_data):
+                for ci, item in enumerate(row):
+                    x, y, w, h = item['box']
+                    raw = page.screenshot(
+                        clip={'x': x, 'y': y, 'width': w, 'height': h}, full_page=True
+                    )
+                    fname = f'{args.name}-{ri + 1}-{ci + 1}.png'
+                    (images_dir / fname).write_bytes(raw)
+                    item['file'] = fname
+        else:
+            # 合成：逐层取原始 PNG，用实测 bbox 叠到透明画布上。
+            # 用截图会把父容器的底色一起烘焙进去（不可换肤、体积翻几倍）。
+            flat_handles = []
+            for cls in row_classes:
+                flat_handles.extend(page.query_selector_all(f'.{cls} > div'))
+            flat_items = [it for row in rows_data for it in row]
+            for idx, item in enumerate(flat_items):
+                if idx < len(flat_handles):
+                    item['layers'] = page.evaluate(_LAYERS_JS, flat_handles[idx])
+        browser.close()
 
+    # ---------- 1.5 合成透明底图形（mode=compose） ----------
+    if args.mode != 'screenshot':
+        from hashlib import md5
+
+        from PIL import Image
+
+        cache: dict[str, str] = {}
         for ri, row in enumerate(rows_data):
             for ci, item in enumerate(row):
-                x, y, w, h = item['box']
-                raw = page.screenshot(
-                    clip={'x': x, 'y': y, 'width': w, 'height': h}, full_page=True
-                )
-                fname = f'{args.name}-{ri + 1}-{ci + 1}.png'
-                (images_dir / fname).write_bytes(raw)
+                w, h = item['box'][2], item['box'][3]
+                # 按 DOM 文档顺序（先序）叠加：父子之间的绘制顺序由文档顺序决定，
+                # 与 z-index 无关。按 z 排序会让"子元素被父背景盖住"
+                # （实测：宝箱列 btn-locked z=101 是 prop-bg-18 z=103 的子元素，
+                #  按 z 排会丢掉"待开启"文字）。
+                layers = sorted(item.get('layers') or [], key=lambda l: l['order'])
+                # 图层允许负坐标或超出列盒（如宝箱的底板 box=[-5,96,140,80]），
+                # 直接按列尺寸建画布 alpha_composite 会错位；先扩画布再裁回。
+                min_x = min([0] + [l['x'] for l in layers])
+                min_y = min([0] + [l['y'] for l in layers])
+                max_x = max([w] + [l['x'] + l['w'] for l in layers])
+                max_y = max([h] + [l['y'] + l['h'] for l in layers])
+                canvas = Image.new('RGBA', (max_x - min_x, max_y - min_y), (0, 0, 0, 0))
+                for layer in layers:
+                    path = images_dir / Path(layer['src']).name
+                    if not path.exists():
+                        continue
+                    img = Image.open(path).convert('RGBA')
+                    # 浏览器会把背景图画在元素盒内并裁掉溢出部分
+                    if img.width > layer['w'] or img.height > layer['h']:
+                        img = img.crop((0, 0, min(img.width, layer['w']),
+                                        min(img.height, layer['h'])))
+                    canvas.alpha_composite(img, (layer['x'] - min_x, layer['y'] - min_y))
+                canvas = canvas.crop((-min_x, -min_y, -min_x + w, -min_y + h))
+                digest = md5(canvas.tobytes()).hexdigest()[:10]
+                if digest in cache:
+                    item['file'] = cache[digest]
+                    continue
+                fname = f'{args.name}-{digest}.png'
+                canvas.save(images_dir / fname)
+                cache[digest] = fname
                 item['file'] = fname
-        browser.close()
 
     # ---------- 2. 算网格参数 ----------
     all_items = [it for row in rows_data for it in row]
