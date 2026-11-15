@@ -495,9 +495,17 @@ class LayoutOptimizeStage(Stage):
         """
         import json as _json
 
+        import re as _re
+
         html_opt_path = html_path.with_name(html_path.stem + "_optimized.html")
         css_opt_path = css_path.with_name(css_path.stem + "_optimized.css")
-        html_opt = html_opt.replace('href="style.css"', 'href="style_optimized.css"')
+        # index.html 里的 CSS 链接带内容指纹（``style.css?v=xxx``），这里按正则
+        # 换成优化版样式表并**丢弃旧版本号**（后面会用优化版 CSS 重新算）。
+        html_opt = _re.sub(
+            r'href="style\.css(?:\?[^"]*)?"',
+            'href="style_optimized.css"',
+            html_opt,
+        )
 
         # 剥离 dev metadata（data-name / data-type / id="layer-*"）→ layer_map.json
         # 注意：这里必须走「字符串 → 重新解析」的路径。直接在 LayoutOptimizer 的
@@ -579,9 +587,11 @@ class LayoutOptimizeStage(Stage):
         # 避免预览器缓存旧 CSS 导致“新 HTML + 旧 CSS”错配。
         import hashlib as _hashlib
         css_version = _hashlib.md5(css_text.encode("utf-8")).hexdigest()[:8]
-        html_opt = html_opt.replace(
-            'href="style_optimized.css"',
+        html_opt = _re.sub(
+            r'href="style_optimized\.css(?:\?[^"]*)?"',
             f'href="style_optimized.css?v={css_version}"',
+            html_opt,
+            count=1,
         )
         html_opt_path.write_text(html_opt, encoding="utf-8")
 

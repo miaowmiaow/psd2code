@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar
 
 if TYPE_CHECKING:
     from ..context import CodegenContext
@@ -58,10 +58,18 @@ class RendererRegistry:
         return list(cls._registry.keys())
 
 
-def register_renderer(layer_type: str) -> Callable[[type[NodeRenderer]], type[NodeRenderer]]:
-    """类装饰器：把 NodeRenderer 子类自注册到 RendererRegistry。"""
+_RendererCls = TypeVar("_RendererCls", bound=type[NodeRenderer])
 
-    def _wrap(renderer_cls: type[NodeRenderer]) -> type[NodeRenderer]:
+
+def register_renderer(layer_type: str) -> Callable[[_RendererCls], _RendererCls]:
+    """类装饰器：把 NodeRenderer 子类自注册到 RendererRegistry。
+
+    用 TypeVar 保留**被装饰的原始类**（而不是退化成 ``type[NodeRenderer]``），
+    否则基于这个类的子类（如 ``TextRenderer(ImageRenderer)``）会被类型检查
+    误判为"未实现抽象方法 render"。
+    """
+
+    def _wrap(renderer_cls: _RendererCls) -> _RendererCls:
         renderer_cls.layer_type = layer_type
         RendererRegistry.register(layer_type, renderer_cls)
         return renderer_cls

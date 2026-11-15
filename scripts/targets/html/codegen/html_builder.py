@@ -5,8 +5,6 @@
 拼装成最终的 style.css / index.html / main.js 字符串。
 """
 
-from typing import Any
-
 from .context import CodegenContext
 from .version import __version__
 
@@ -75,15 +73,30 @@ body {{
     # HTML
     # ------------------------------------------------------------------
 
-    def build_html(self, layers_html: str) -> str:
+    def build_html(
+        self,
+        layers_html: str,
+        css_version: str = "",
+        js_version: str = "",
+    ) -> str:
+        """拼装 index.html。
+
+        ``css_version`` / ``js_version``：写进 ``style.css?v=`` / ``main.js?v=``
+        的缓存版本号（通常是文件内容的 md5 前缀）。产物目录每次转换都会被
+        重建、文件名固定，若不带版本号，浏览器/内嵌 webview 可能继续用**上一轮
+        的 style.css**——新 HTML（文字层已改为 PNG 背景）+ 旧 CSS（文字层只有
+        字号）会让文字整片消失。带上内容指纹即可彻底避免这种"半新半旧"。
+        """
         ctx = self.ctx
+        css_q = f"?v={css_version}" if css_version else ""
+        js_q = f"?v={js_version}" if js_version else ""
         return f'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>{ctx.psd_name}</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css{css_q}">
 </head>
 <body>
     <div id="canvas-wrap">
@@ -91,7 +104,7 @@ body {{
 {layers_html}    </div>
     </div>
 
-    <script src="main.js"></script>
+    <script src="main.js{js_q}"></script>
 </body>
 </html>
 '''
@@ -174,8 +187,3 @@ class HtmlBuilderMixin:
 
     def _build_js(self) -> str:
         return self._html_builder.build_js()
-
-    def _text_style_css(self, layer: dict[str, Any]) -> str:
-        # 仅保留给少数旧测试调用；实际渲染中已由 TextRenderer 自带
-        from .renderers.text_renderer import _text_style_css
-        return _text_style_css(layer)

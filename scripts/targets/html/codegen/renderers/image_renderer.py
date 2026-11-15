@@ -14,6 +14,10 @@ from .css_helpers import position_css_lines, read_png_size, semantic_css_class
 class ImageRenderer(NodeRenderer):
     """普通图片图层。也作为 layer type 缺省回退。"""
 
+    #: 输出到 div 的 ``data-type`` 值；文字图层子类覆盖为 ``"text"``。
+    #: LayoutOptimizer 在后处理阶段靠它区分"图片 / 文字 / 组"语义。
+    data_type: str = "image"
+
     def render(
         self,
         layer: dict[str, Any],
@@ -45,7 +49,7 @@ class ImageRenderer(NodeRenderer):
         css += '}'
         self.ctx.css_rules.append(css)
 
-        html = f'{pad}<div id="{layer_id}" class="{class_name}" data-name="{_esc(layer["name"])}" data-type="image">\n'
+        html = f'{pad}<div id="{layer_id}" class="{class_name}" data-name="{_esc(layer["name"])}" data-type="{self.data_type}">\n'
         html += f'{pad}</div>\n'
         return html
 

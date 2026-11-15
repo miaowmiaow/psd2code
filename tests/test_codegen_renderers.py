@@ -273,115 +273,6 @@ class TestCalculateActualBounds:
 
 
 # =====================================================================
-# TextRenderer helpers
-# =====================================================================
-
-from targets.html.codegen.renderers.text_renderer import _fmt_num, _text_style_css  # noqa: E402 - 按测试分区分段导入
-
-
-class TestFmtNum:
-    """_fmt_num: CSS-safe number formatting."""
-
-    def test_integer(self):
-        assert _fmt_num(16.0) == "16"
-
-    def test_actual_integer(self):
-        assert _fmt_num(16) == "16"
-
-    def test_two_decimal_places(self):
-        assert _fmt_num(22.099999999999998) == "22.1"
-
-    def test_trailing_zero_stripped(self):
-        assert _fmt_num(10.50) == "10.5"
-
-    def test_small_decimal(self):
-        assert _fmt_num(0.85) == "0.85"
-
-    def test_non_numeric(self):
-        assert _fmt_num("abc") == "abc"
-
-    def test_zero(self):
-        assert _fmt_num(0) == "0"
-
-
-class TestTextStyleCss:
-    """_text_style_css: generate text-specific CSS properties."""
-
-    def _text_layer(self, **overrides):
-        base = {
-            "width": 200, "height": 30,
-            "text": "Hello",
-            "text_style": {
-                "font_size": 16,
-                "color": "#333",
-                "text_align": "left",
-            },
-        }
-        base.update(overrides)
-        return base
-
-    def test_basic_output(self):
-        css = _text_style_css(self._text_layer())
-        assert "font-size:" in css
-        assert "color: #333;" in css
-        assert "text-align: left;" in css
-
-    def test_font_size_capped(self):
-        """Font size >= single_line_h * 0.85 → capped to 0.85 * h."""
-        layer = self._text_layer(height=20)
-        layer["text_style"]["font_size"] = 30
-        css = _text_style_css(layer)
-        # 30 >= 20*0.85=17 → capped to 17
-        assert "font-size: 17px;" in css
-
-    def test_multiline_line_height(self):
-        """Multi-line text → line-height = single_line_h."""
-        layer = self._text_layer(height=60, text="line1\rline2\rline3")
-        layer["text_style"]["font_size"] = 12
-        css = _text_style_css(layer)
-        assert "line-height:" in css
-        # 3 lines, h=60, single_line_h=20
-        assert "20px" in css
-
-    def test_multiline_with_leading(self):
-        """Multi-line with leading < single_line_h → use leading."""
-        layer = self._text_layer(height=60, text="A\rB")
-        layer["text_style"]["font_size"] = 12
-        layer["text_style"]["leading"] = 25
-        css = _text_style_css(layer)
-        assert "line-height: 25px;" in css
-
-    def test_multiline_leading_exceeds(self):
-        """Multi-line with leading > single_line_h → clamp to single_line_h."""
-        layer = self._text_layer(height=60, text="A\rB")
-        layer["text_style"]["font_size"] = 12
-        layer["text_style"]["leading"] = 50
-        css = _text_style_css(layer)
-        # single_line_h=30, leading=50 > 30 → clamped to 30
-        assert "line-height: 30px;" in css
-
-    def test_no_color(self):
-        layer = self._text_layer()
-        layer["text_style"].pop("color")
-        css = _text_style_css(layer)
-        assert "color:" not in css
-
-    def test_no_text_align(self):
-        layer = self._text_layer()
-        layer["text_style"].pop("text_align")
-        css = _text_style_css(layer)
-        assert "text-align:" not in css
-
-    def test_newline_variants(self):
-        """All newline variants (\\r\\n, \\r, \\n) are counted as line breaks."""
-        layer = self._text_layer(height=100, text="A\r\nB\nC\rD")
-        layer["text_style"]["font_size"] = 12
-        css = _text_style_css(layer)
-        # After normalisation: A\nB\nC\nD → 4 lines
-        assert "line-height:" in css
-
-
-# =====================================================================
 # GroupRenderer.render (integration-level, with minimal context)
 # =====================================================================
 
@@ -544,7 +435,11 @@ class TestImageRendererIntegration:
 # =====================================================================
 
 class TestTextRendererIntegration:
-    """TextRenderer.render via LayerRenderer (integration)."""
+    """TextRenderer.render via LayerRenderer (integration).
+
+    文字一律栅格化为图片：渲染结果与 ImageRenderer 一致（PNG 背景），
+    只保留 ``data-type="text"`` 标记，不再输出可编辑文本节点。
+    """
 
     def setup_method(self):
         self.ctx = CodegenContext(
@@ -554,69 +449,43 @@ class TestTextRendererIntegration:
         )
         self.renderer = LayerRenderer(self.ctx)
 
-    def test_basic_text(self):
-        layer = {
+    def _text_layer(self, **overrides):
+        base = {
             "id": "layer-1", "name": "title", "type": "text",
             "left": 20, "top": 100, "width": 200, "height": 30,
             "opacity": 1, "blend_mode": "normal", "z_index": 5,
-            "text": "Hello World",
-            "text_style": {"font_size": 16, "color": "#000"},
+            "image_path": "images/title.png",
         }
+        base.update(overrides)
+        return base
+
+    def test_renders_as_image_with_text_marker(self):
+        layer = self._text_layer()
         html = self.renderer.render(layer, indent=2)
-        assert '<span data-i18n-key=' in html
-        assert "Hello World" in html
         assert 'data-type="text"' in html
-        css = self.ctx.css_rules[0]
-        # Text width is +2
-        assert "width: 202px;" in css
-        assert "font-size:" in css
-
-    def test_text_html_escape(self):
-        """Special chars in text content are escaped."""
-        layer = {
-            "id": "layer-2", "name": "code", "type": "text",
-            "left": 0, "top": 0, "width": 100, "height": 20,
-            "opacity": 1, "blend_mode": "normal", "z_index": 1,
-            "text": "<script>alert(1)</script>",
-            "text_style": {"font_size": 14},
-        }
-        html = self.renderer.render(layer, indent=2)
-        assert "&lt;script&gt;" in html
-        assert "<script>" not in html
-
-    def test_text_newlines_to_br(self):
-        """\\r → <br>."""
-        layer = {
-            "id": "layer-3", "name": "desc", "type": "text",
-            "left": 0, "top": 0, "width": 100, "height": 40,
-            "opacity": 1, "blend_mode": "normal", "z_index": 1,
-            "text": "line1\rline2",
-            "text_style": {"font_size": 12},
-        }
-        html = self.renderer.render(layer, indent=2)
-        assert "<br>" in html
-
-    def test_no_text(self):
-        """Layer with no text → no <span>."""
-        layer = {
-            "id": "layer-4", "name": "empty", "type": "text",
-            "left": 0, "top": 0, "width": 50, "height": 20,
-            "opacity": 1, "blend_mode": "normal", "z_index": 1,
-        }
-        html = self.renderer.render(layer, indent=2)
         assert "<span" not in html
+        css = self.ctx.css_rules[0]
+        assert 'background-image: url("images/title.png");' in css
+        # 不再输出文本排版属性
+        assert "font-size:" not in css
+        assert "line-height:" not in css
 
-    def test_no_text_style(self):
-        """Layer with no text_style → no font CSS."""
-        layer = {
-            "id": "layer-5", "name": "label", "type": "text",
-            "left": 0, "top": 0, "width": 50, "height": 20,
-            "opacity": 1, "blend_mode": "normal", "z_index": 1,
-            "text": "hello",
-        }
+    def test_uses_image_geometry(self):
+        """文字图层宽度不再 +2（与 PNG 实际像素对齐）。"""
+        layer = self._text_layer()
         self.renderer.render(layer, indent=2)
         css = self.ctx.css_rules[0]
-        assert "font-size:" not in css
+        assert "width: 200px;" in css
+        assert "width: 202px;" not in css
+
+    def test_text_layer_without_png(self):
+        """没有 PNG 时与 ImageRenderer 一致：只输出定位，不写 background-image。"""
+        layer = self._text_layer(id="layer-2")
+        layer.pop("image_path")
+        self.renderer.render(layer, indent=2)
+        css = self.ctx.css_rules[0]
+        assert "background-image" not in css
+        assert "position: absolute;" in css
 
 
 # =====================================================================

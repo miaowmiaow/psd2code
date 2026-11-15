@@ -62,8 +62,10 @@ class TextExtractor:
     # ... 还有样式抽取、多段 run 合并等方法
 ```
 
-**关键点**：有旋转/倾斜的文本无法用 CSS 准确还原，`LayerExporter` 会
-把它们降级成 `ImageNode` 导出。
+**关键点**：文字图层一律栅格化为图片——`LayerExporter` 不再调用
+`TextExtractor` 抽取文本，而是直接导出 PNG（layer dict 的 `type` 仍保留
+`"text"`），由 `TextRenderer` 输出 `background-image` + `data-type="text"`。
+本模块保留为文本信息的独立工具（调试 / 未来需要文本语义时可直接引用）。
 
 ## 在 Pipeline 中的位置
 
@@ -72,7 +74,7 @@ Stage 2 ParseToIrStage
   └─ parse_psd_to_ir()
        └─ LayerExporter.export_layers()
             ├─ 内部使用 LayerClassifier 判类型
-            ├─ 内部使用 TextExtractor 抽文本
+            ├─ 文字图层直接导出 PNG（不再抽文本）
             └─ 调用 run_handlers(...) 决策每个图层/组
 ```
 
@@ -80,5 +82,5 @@ Stage 2 ParseToIrStage
 
 - 想识别新的图层语义（如"视频占位"）：在 `classifier.py` 加判定；
   然后在 `handlers.py` 加对应 Handler。
-- 想支持新文本属性（如 OpenType feature）：扩展 `TextExtractor` 并把结果
-  塞进 `TextNode.runs`。
+- 想重新支持可编辑文本：从 `TextExtractor` 取 `text` / `text_style` 写回
+  layer dict，并在 codegen 里按 `type == "text"` 输出文本节点。

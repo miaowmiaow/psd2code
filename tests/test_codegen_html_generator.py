@@ -105,6 +105,14 @@ class TestHtmlBuilder:
         assert "<div>content</div>" in html
         assert 'src="main.js"' in html
 
+    def test_build_html_asset_versions(self):
+        """CSS/JS 链接带内容指纹，避免浏览器复用上一轮同名文件。"""
+        html = self.builder.build_html(
+            "<div>content</div>\n", css_version="abc12345", js_version="def67890",
+        )
+        assert 'href="style.css?v=abc12345"' in html
+        assert 'src="main.js?v=def67890"' in html
+
     def test_build_js_content(self):
         js = self.builder.build_js()
         assert f"PSD2HTML v{__version__}" in js
@@ -301,8 +309,7 @@ class TestHTMLGeneratorMultipleLayers:
                         "id": "layer-2", "name": "标题", "type": "text",
                         "left": 120, "top": 20, "width": 200, "height": 30,
                         "opacity": 1, "blend_mode": "normal", "z_index": 3,
-                        "text": "Welcome",
-                        "text_style": {"font_size": 22, "color": "#fff"},
+                        "image_path": "images/title.png",
                     },
                 ],
             },
@@ -316,9 +323,10 @@ class TestHTMLGeneratorMultipleLayers:
         # Image
         assert 'data-type="image"' in html
         assert "logo.png" in css
-        # Text
+        # 文字图层：栅格化为图片，仅保留 data-type="text" 标记
         assert 'data-type="text"' in html
-        assert "Welcome" in html
+        assert "title.png" in css
+        assert "<span" not in html
         # Multiple CSS rules
         assert css.count("position: absolute;") >= 3
 

@@ -84,7 +84,8 @@ def install(target_dir=None):
                     href = href_m.group(1)
                     if href.startswith(('http://','https://','//')):
                         return tag
-                    css_path = os.path.join(base_dir, href)
+                    # href 可能带缓存指纹（style.css?v=xxxx），读文件时必须去掉
+                    css_path = os.path.join(base_dir, href.split('?')[0].split('#')[0])
                     try:
                         with open(css_path, 'r', encoding='utf-8') as cf:
                             css = cf.read()

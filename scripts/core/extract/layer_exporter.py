@@ -6,7 +6,8 @@
 - 解析阶段不做任何"装饰性合图"
 - 唯一例外：PSD 原生剪贴蒙版语义（CSS 无法等价还原），见 _merge_clipping_group
   与 _export_clipped_layer_against_group_base
-- 文本图层保留为 text 类型，有旋转/倾斜或图层效果的文本降级为图片
+- 文字图层一律栅格化为图片（不再提取可编辑文本），layer type 仍标记为 text，
+  由 TextRenderer 输出 PNG 背景 + data-type="text" 标记
 - 图片图层会渲染描边/阴影/发光等效果（PSD 像素级还原）
 - 图片命名 = 原图层名（拼音）+ 内容指纹
 
@@ -26,7 +27,6 @@ import numpy as np
 from config import Config
 from common.utils import make_image_filename
 from common.image_utils import ImageArrayUtils
-from core.psd.text_extractor import TextExtractor
 from core.render.effects.effects_renderer import (
     render_layer_with_effects,
     render_layer_with_effects_on_image,
@@ -575,7 +575,7 @@ class LayerExporter:
         parent_left: int = 0, parent_top: int = 0,
         clip_bbox: tuple[int, int, int, int] | None = None,
     ) -> dict[str, Any] | None:
-        """导出单个图层（图片或文本）
+        """导出单个图层（文字图层同样栅格化为图片，仅保留 type='text' 标记）
 
         Args:
             clip_bbox: 可选的裁剪区域 (left, top, right, bottom)，用于裁剪到父组范围
@@ -618,41 +618,18 @@ class LayerExporter:
             }
 
             # 判断是否为文本图层
+            # 文字一律栅格化为图片（不再提取可编辑文本 / text_style），
+            # 直接走下面的图片导出流程；layer type 仍标记为 'text'，
+            # 由 TextRenderer 输出 PNG 背景 + data-type="text" 标记。
             kind = str(layer.kind) if hasattr(layer, 'kind') else ''
             is_text = 'type' in kind.lower()
-
             if is_text:
-                # 有旋转/倾斜的文本无法用 CSS 还原，降级为图片
-                if TextExtractor.has_transform(layer):
-                    logger.info(f"{'  ' * depth}🔄 {layer_name} (文本有旋转/倾斜 → 降级为图片)")
-                    is_text = False
-                # 有效果（描边/阴影/发光）的文本降级为图片，由效果渲染器处理
-                # 注意：必须同时满足"图层样式整体开关 enabled=True"和"至少一个子效果 enabled=True"
-                # PSD 中 effects.enabled=False 时，PS 实际不渲染任何效果（即使子项 enabled=True）
-                elif hasattr(layer, 'effects') and layer.effects and any(
-                    is_effect_active(e, layer) for e in layer.effects
-                ):
-                    logger.info(f"{'  ' * depth}✨ {layer_name} (文本有效果 → 降级为图片)")
-                    is_text = False
-                else:
-                    text_data = TextExtractor.extract_text_info(
-                        layer, layer_height=height, layer_width=width,
-                    )
-                    if text_data:
-                        layer_info['type'] = 'text'
-                        layer_info['text'] = text_data['text']
-                        layer_info['text_style'] = text_data['style']
-                        preview = text_data['text'][:20].replace('\n', '\\n')
-                        logger.info(f"{'  ' * depth}📝 {layer_name} [\"{preview}\"]")
-                        self.exported_count += 1
-                        return layer_info
-                    else:
-                        is_text = False
+                logger.info(f"{'  ' * depth}📝 {layer_name} (文字图层 → 栅格化为图片)")
 
             # 导出为图片
             img_result = self._export_layer_image(layer, layer_name, depth, clip_bbox=clip_bbox)
             if img_result:
-                layer_info['type'] = 'image'
+                layer_info['type'] = 'text' if is_text else 'image'
                 layer_info['image_path'] = img_result['path']
                 # 应用裁剪 / 效果扩展导致的坐标调整
                 layer_info['left'] += img_result['adj_left']

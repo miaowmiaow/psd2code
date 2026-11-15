@@ -15,6 +15,7 @@
 """
 
 from typing import Any
+import hashlib
 import json
 from pathlib import Path
 
@@ -24,6 +25,11 @@ from .naming import SimpleNamer  # noqa: F401
 from .context import CodegenContext
 from .html_builder import HtmlBuilder
 from .layer_renderer import LayerRenderer
+
+
+def _content_version(text: str) -> str:
+    """内容指纹（md5 前 8 位），用作 ``?v=`` 缓存版本号。"""
+    return hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
 
 
 class HTMLGenerator:
@@ -101,18 +107,27 @@ class HTMLGenerator:
                 layer, indent=2, parent=None, siblings=layers_tree,
             )
 
+        # CSS / JS 各生成一次：内容既落盘，也用来算缓存版本号
+        css_text = self._html_builder.build_css()
+        js_text = self._html_builder.build_js()
+
         # 写入 style.css
         css_path = self.ctx.output_dir / 'style.css'
-        css_path.write_text(self._html_builder.build_css(), encoding='utf-8')
+        css_path.write_text(css_text, encoding='utf-8')
 
         # 写入 main.js
         js_path = self.ctx.output_dir / 'main.js'
-        js_path.write_text(self._html_builder.build_js(), encoding='utf-8')
+        js_path.write_text(js_text, encoding='utf-8')
 
-        # 写入 index.html
+        # 写入 index.html（CSS/JS 带内容指纹，避免浏览器复用上一轮的同名文件）
         html_path = self.ctx.output_dir / 'index.html'
         html_path.write_text(
-            self._html_builder.build_html(layers_html), encoding='utf-8',
+            self._html_builder.build_html(
+                layers_html,
+                css_version=_content_version(css_text),
+                js_version=_content_version(js_text),
+            ),
+            encoding='utf-8',
         )
         return str(html_path)
 
@@ -153,24 +168,12 @@ class HTMLGenerator:
 └── README.md       # 本文件
 ```
 
-## 多语言使用
-文本图层带有 `data-i18n-key` 属性，可用 JS 批量替换：
+## 文字图层
+文字一律栅格化为图片（PNG 背景），HTML 中不保留可编辑文本节点；
+对应 div 带 `data-type="text"` 标记（优化版会剥离到 `layer_map.json`），
+用于区分"文字"与普通装饰图片。需要改文案时请替换 `images/` 下对应 PNG。
 
-```javascript
-const i18n = {{
-  'zh': {{ '用户名': '用户名', '确认': '确认' }},
-  'en': {{ '用户名': 'Username', '确认': 'Confirm' }},
-}};
-
-function setLang(lang) {{
-  document.querySelectorAll('[data-i18n-key]').forEach(el => {{
-    const key = el.getAttribute('data-i18n-key');
-    if (i18n[lang] && i18n[lang][key]) {{
-      el.textContent = i18n[lang][key];
-    }}
-  }});
-}}
-```
+`main.js` 里的 `setLanguage()` 仅对页面中手动插入的 `[data-i18n-key]` 节点生效。
 
 ## 预览
 ```bash
