@@ -90,6 +90,9 @@ class LayerInfo:
     decls: dict[str, str]
     z: float
     bg: Optional[str]
+    element: Any = None
+    nested_imgs: int = 0      # 子层内部还有几张图（压平会丢）
+    nested_spans: int = 0     # 子层内部有几段文本
 
 
 @dataclass
@@ -109,11 +112,19 @@ class NodeInfo:
         return (_geom(self.decls), len(self.layers), self.text_depth)
 
 
-def analyze(soup: Any, rules: dict[str, dict[str, str]], class_filter: Optional[str] = None) -> list[NodeInfo]:
+def analyze(
+    soup: Any,
+    rules: dict[str, dict[str, str]],
+    class_filter: Optional[str | list[str]] = None,
+) -> list[NodeInfo]:
+    wanted: Optional[set[str]] = None
+    if class_filter:
+        wanted = {class_filter} if isinstance(class_filter, str) else set(class_filter)
+
     nodes: list[NodeInfo] = []
     for el in soup.find_all('div'):
         classes = el.get('class') or []
-        if class_filter and class_filter not in classes:
+        if wanted is not None and not (wanted & set(classes)):
             continue
         primary = next((c for c in classes if c in rules), None)
         if not primary:
@@ -128,10 +139,17 @@ def analyze(soup: Any, rules: dict[str, dict[str, str]], class_filter: Optional[
             if not kcls:
                 continue
             kdecls = rules[kcls]
+            nested_imgs = sum(
+                1 for d in kid.find_all('div')
+                if _bg(rules.get(next((c for c in (d.get('class') or []) if c in rules), ''), {}))
+            )
             layers.append(LayerInfo(
                 cls=kcls, decls=kdecls,
                 z=_num(kdecls, 'z-index'),
                 bg=_bg(kdecls),
+                element=kid,
+                nested_imgs=nested_imgs,
+                nested_spans=len(kid.find_all('span')),
             ))
 
         if not layers:
@@ -177,6 +195,12 @@ def verdict(candidates: list[NodeInfo]) -> tuple[bool, str]:
     layer = first.layers[0]
     if not layer.bg:
         return False, f'.{layer.cls} 没有背景图'
+    # 子层内部若还有「图片元素」或「多段文本」，压成单张背景会丢掉它们
+    # （实测：领奖 .rect-7 内含 13 个 div，其中有图标；V1 .rect-37 只包一层文本容器，可安全合并）
+    if layer.nested_spans > 1:
+        return False, f'.{layer.cls} 内含 {layer.nested_spans} 段文本，压平会丢字'
+    if layer.nested_imgs:
+        return False, f'.{layer.cls} 内含 {layer.nested_imgs} 个图片元素，压平会丢图'
 
     if len({n.signature for n in candidates}) > 1:
         return False, '实例几何不一致'
@@ -225,17 +249,18 @@ def do_apply(
     soup: Any,
     css: str,
     rules: dict[str, dict[str, str]],
-    target_cls: str,
+    target_cls: str | list[str],
     template: str,
     mode: str,
 ) -> tuple[str, str, dict]:
-    nodes = [n for n in analyze(soup, rules, class_filter=target_cls)]
+    target_classes = [target_cls] if isinstance(target_cls, str) else list(target_cls)
+    nodes = analyze(soup, rules, class_filter=target_classes)
     if not nodes:
-        raise SystemExit(f'没有找到 .{target_cls} 的实例')
+        raise SystemExit(f'没有找到 {target_classes} 的实例')
 
     safe, reason = verdict(nodes)
     if not safe:
-        raise SystemExit(f'拒绝合并 .{target_cls}：{reason}')
+        raise SystemExit(f'拒绝合并 {target_classes}：{reason}')
 
     first = nodes[0]
     layer = first.layers[0]
@@ -251,7 +276,7 @@ def do_apply(
     extra: list[str] = []
 
     # 模板类继承容器的**全部**声明（margin / z-index / flex-shrink 都不能丢）
-    container = dict(rules[target_cls])
+    container = dict(rules[nodes[0].cls])
 
     if use_pseudo:
         extra.append(
@@ -284,14 +309,14 @@ def do_apply(
             node.element.append(span)
 
     # 删除**所有实例**的子层/文本容器规则（各实例的类名不同，不能只删第一个）
-    dead: set[str] = {target_cls}
+    dead: set[str] = set(target_classes)
     for node in nodes:
         dead.update(l.cls for l in node.layers)
         if node.text_container_cls:
             dead.add(node.text_container_cls)
     for cls in dead:
         css = _drop_rule(css, cls)
-    css = css.rstrip() + '\n\n/* templatize: ' + target_cls + ' -> ' + template + ' */\n' + '\n'.join(extra) + '\n'
+    css = css.rstrip() + '\n\n/* templatize: ' + ','.join(target_classes) + ' -> ' + template + ' */\n' + '\n'.join(extra) + '\n'
 
     return css, str(soup), {
         'instances': len(nodes),
@@ -308,6 +333,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument('--scan', action='store_true', help='只体检，输出同构簇与安全判定')
     parser.add_argument('--min-count', type=int, default=3, help='--scan 的最小实例数')
     parser.add_argument('--class', dest='target_cls', help='要合并的目标 class')
+    parser.add_argument('--classes', help='多个 class（逗号分隔），用于类名不同但几何同构的簇')
     parser.add_argument('--template', help='新模板类名')
     parser.add_argument('--mode', choices=('auto', 'background', 'before'), default='auto')
     parser.add_argument('--apply', action='store_true', help='真正写入文件')
@@ -328,12 +354,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(do_scan(soup, rules, args.min_count), ensure_ascii=False, indent=1))
         return 0
 
-    if not args.target_cls or not args.template:
-        raise SystemExit('需要 --class 与 --template')
+    targets = args.target_cls or args.classes
+    if not targets or not args.template:
+        raise SystemExit('需要 --class/--classes 与 --template')
+    target = [c.strip() for c in targets.split(',') if c.strip()]
+    if len(target) == 1:
+        target = target[0]
     if not args.apply:
         raise SystemExit('需要 --apply（建议先 --scan 看判定）')
 
-    new_css, new_html, stats = do_apply(soup, css, rules, args.target_cls, args.template, args.mode)
+    new_css, new_html, stats = do_apply(soup, css, rules, target, args.template, args.mode)
     css_path.write_text(new_css, encoding='utf-8')
     html_path.write_text(new_html, encoding='utf-8')
     print(json.dumps(stats, ensure_ascii=False))

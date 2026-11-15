@@ -88,6 +88,26 @@ class TestVerdict:
         assert not safe
         assert "z=" in reason
 
+    def test_rejects_when_layer_wraps_images(self):
+        """子层内部还有图时压平会丢图（实测：领奖 .rect-7 内含 13 个 div）。"""
+        css = CSS + '\n.inner-img { position:absolute; left:0px; top:0px; width:10px; height:10px; background: url("images/c.png") no-repeat; }'
+        html = (
+            '<div class="tag"><div class="tag-bg">'
+            '<div class="inner-img"></div><span>+10</span>'
+            '</div></div>'
+        )
+        nodes = analyze(BeautifulSoup(html, "html.parser"), parse_css(css), class_filter="tag")
+        safe, reason = verdict(nodes)
+        assert not safe
+        assert "图片" in reason
+
+    def test_rejects_when_layer_wraps_multiple_texts(self):
+        html = '<div class="tag"><div class="tag-bg"><span>a</span><span>b</span></div></div>'
+        nodes = analyze(BeautifulSoup(html, "html.parser"), parse_css(CSS), class_filter="tag")
+        safe, reason = verdict(nodes)
+        assert not safe
+        assert "文本" in reason
+
     def test_rejects_multi_layer(self):
         html = '<div class="tag"><div class="tag-bg"></div><div class="tag-bg"></div></div>'
         safe, reason = verdict(_analyze(html))
