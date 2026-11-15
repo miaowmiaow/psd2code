@@ -324,3 +324,81 @@ bbox(568, 890, 140, 200) →
 - 装饰层如果**和槽位同层、必须一起**（如南瓜的宝石）→ 才合成。
 
 判定：装饰层超出槽位本体范围（这里是宽的 209 vs 135、高 101 vs 72），说明它是"背景装饰"而非"本体的一部分"。
+
+## 18. 改文件必须断言，改完要「读回」验证
+
+### 症状：改了四轮，页面纹丝不动
+
+评论区卡片底栏一直落在卡内（相对卡片 y=468，目标 496）。我连续改了四次：
+
+1. `position: absolute; top: 496px`
+2. 改成固定高度 + margin
+3. 又改回 absolute
+4. 再调 margin
+
+每次"改完"都重算，结果一直是 468。
+
+**真相**：CSS 里那条规则一直是 `margin: 20px 0 0 8px`，我写的四次替换**一次都没生效**。
+
+```python
+t = t.replace("""  margin: 60px 0 0 -78px;""", """  position: absolute; ...""")
+# CSS 实际是 margin: 20px 0 0 8px → 找不到 → 什么都不做 → 不报错
+```
+
+`str.replace()` 匹配不到就静默返回原串。我以为改了，实际没改，然后在**错误的状态上反复调参数**——四轮全废。
+
+检查 computed style 才发现：`footPos: 'static'`、`footMargin: '20px 0 0 8px'`——和我"写的"完全对不上。
+
+### 必须这样改
+
+```python
+old = """.comment-card__foot {
+  display: flex;
+  margin: 20px 0 0 8px;
+  width: 611px;
+}"""
+assert old in t, f"待替换文本不存在，实际内容已变：{old[:60]}"
+t = t.replace(old, new)
+```
+
+**`assert old in t` 是硬要求**。它挡住的不只是"文本写错"，还有"上一轮已经改过、现在文本又变了"。
+
+更稳的做法（多行规则用）：
+
+```python
+import re
+pat = re.compile(r'\.comment-card__foot\s*\{[^}]*\}')
+assert pat.search(t), '规则不存在'
+t = pat.sub(new_rule, t)
+```
+
+### 改完必须读回 computed style
+
+编辑器里的 CSS 写对了，不等于浏览器里生效——可能被后面的同名规则覆盖、被继承值影响、或被 `!important` 压掉。
+
+```js
+getComputedStyle(el).position   // 应为 'absolute'，如果是 'static' 说明没生效
+getComputedStyle(el).top        // 应为 '496px'，如果是 'auto' 说明没设上
+```
+
+实测就是这样发现问题的：`footPos: 'static'`。
+
+**判定顺序**：
+
+| 检查 | 说明 |
+|---|---|
+| 改完立刻 `grep` 该规则 | 确认文件里真的是新内容 |
+| 再读 computed style | 确认浏览器里真的生效 |
+| 最后才看像素/截图 | 前两步都没问题，才有资格谈"效果" |
+
+我之前直接跳到第三步——看到位置没变就调参数，从没怀疑"改没改上"。**这四轮的时间全浪费在这里。**
+
+### 同一毛病的历史记录
+
+本轮对话中，`str.replace` 静默失败至少三次：
+
+| 改的东西 | 结果 |
+|---|---|
+| `index_hand.html` 的 task-row 结构 | 第一次替换 0 处命中，白改一轮 |
+| SKILL.md 的锚点文本 | 三次 AssertionError（这次有断言，及时暴露） |
+| `.comment-card__foot` 的定位 | 四次未生效，在错状态上反复调参 |
