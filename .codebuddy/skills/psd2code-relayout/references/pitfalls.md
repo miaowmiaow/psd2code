@@ -658,3 +658,54 @@ has_text = len(d['txts']) > 0
 | z 高出 100+ | 脱离流，单独放 |
 
 **这条也解释了为什么那格适合整格合成**：10 层里有 3 层是浮层，逐层塞 flex 必然出错。按 SKILL 的例外条款（层数 >6 或含浮层 → 允许整格合成），这里的取值是合理的——但必须注释「不可换肤」。
+
+## 25. grid 叠同格会让容器高度塌陷
+
+「独立定位」是修「负 margin 串联」的正确方向，但它有个陷阱：**容器高度不再由子元素累加决定**。
+
+### 实测（南瓜页 6 处负 margin 一次改造）
+
+| 位置 | 容器高度来源 | 改 grid 后 |
+|---|---|---|
+| `.chest-slot`（宝箱 108 + 黄条 80） | max(108, 82+80) | ✅ 成功 |
+| `.chest-row`（4 个槽） | max(图高) | ✅ 成功 |
+| `.reward-bar`（提示 + 图标行） | max | ✅ 成功 |
+| `.task-card`（标题 51 + 正文 329） | **累加** | ❌ 页面少 47px |
+| `.task-row`（主行 78 + 奖励） | **累加** | ❌ 同上 |
+| `.comments`（标题 72 + 板 1400） | **累加** | ❌ 同上 |
+
+后三处让还原度 **79.77% → 70.92%**（页面高度 6778 → 6731），已回退。
+
+### 原因
+
+```css
+/* flex column：margin-top 会把后续元素往下推，容器跟着变高 */
+.task-card { display: flex; flex-direction: column; }
+.task-card__body { margin-top: 22px; height: 329px; }   /* 容器高 = 51 + 22 + 329 = 402 */
+
+/* grid 叠同格：三个子元素占同一格，margin 只影响绘制位置 */
+.task-card { display: grid; }
+.task-card > * { grid-area: 1/1; }
+/* 容器高 = max(51, 25, 47+329) = 376  ← 少了 26 */
+```
+
+### 判定
+
+```
+容器高度 = "最高那个子元素" → 改 grid 安全
+容器高度 = "几个子元素加起来" → 改 grid 必须显式写 height
+```
+
+后者要么补齐 `height`，要么**只把真正需要独立定位的那一个元素抽出来**，容器仍用 flex。
+
+### 顺带一个编辑错误
+
+这轮我用 `grep` 看到的是 `' '.join(m.group(0).split())` 压缩后的文本（单行），拿它当 `str.replace` 的匹配串，连续两次 `AssertionError`——**实际文件里是多行**。
+
+正确做法：按选择器用正则整条替换，不要复制"显示出来的样子"。
+
+```python
+pat = re.compile(r'(\.task-card\s*\{)([^}]*)(\})')
+if not pat.search(t): raise SystemExit('规则不存在')
+t = pat.sub(lambda m: m.group(1) + new_body + m.group(3), t, count=1)
+```
