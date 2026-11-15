@@ -60,10 +60,6 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.6",
 ]
-# 产物级重排工具（scripts/tools/ai_relayout.py）的像素校验依赖
-verify = [
-    "playwright>=1.40",
-]
 
 [project.urls]
 Homepage      = "https://github.com/miaowmiaow/psd2code"
