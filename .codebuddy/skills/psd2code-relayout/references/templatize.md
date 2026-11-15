@@ -2,6 +2,21 @@
 
 产物里最普遍的"不规范"不是布局，而是**重复单元被复制成 N 份独立 DOM + N 套 CSS**。这是最值得做、也最容易做到零像素代价的改造。
 
+## 用脚本做（推荐）
+
+```bash
+python scripts/templatize.py <html_dir> --scan
+python scripts/templatize.py <html_dir> --class <目标class> --template <新类名> --apply
+```
+
+`--scan` 输出每个同构簇的：实例数、子层、几何签名、`text_depth`、`z` 关系、`safe` 与原因。它已经把「文本嵌入深度」和「子层 z-index 是否高于文本」算好，不需要等像素校验失败才发现。
+
+`--apply` 做的事：摘出 span → 删子层 div → 容器（或 `::before`）承接背景 → 删除所有实例的子层规则与容器规则 → 写入文件。`mode=auto` 时，子层带 z-index 就用 `::before`，否则用 `background`。
+
+实测（V1，3 个簇共 22 个实例）：`div` 478 → 434、CSS 规则 409 → 365、体积 −10.6%、整页 `maxΔ=0`——与手工脚本结果一致。
+
+脚本只负责"结构合并"，不代替验收：改完必须跑 `verify_page.py`。
+
 ## 先确认同构
 
 把每个候选实例的 CSS 规则做归一化（去掉 `z-index` 与 `background`），比较几何签名：
