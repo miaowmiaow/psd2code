@@ -123,6 +123,23 @@ position: absolute 的规则数 / CSS 规则总数 < 10%
    底板是 724×1698 / 704×1638 的固定图，靠内容撑开会让它缩成 800px，内部元素全部上移。
 3. **同构单元用模板 + 数据**（共用 class + 内联变量），不复制 N 份结构。
 
+**合成图片时必须带断言（同一个错误犯过两次：按钮变成纯蓝底、没有文字）：**
+
+```python
+# ① 文件不存在就停，不要 continue
+missing = [n for n in names if not (images_dir / n).exists()]
+if missing:
+    raise SystemExit(f"素材缺失：{missing}")
+# ② 图层没命中就停（防坐标范围写错）
+if len({i['src'] for i in sel}) != len(names):
+    raise SystemExit("图层未命中，检查 bbox 范围")
+# ③ 合成后验证：文字类图放大看一眼，或统计非背景像素
+```
+
+`if not f.exists(): continue` 是这类 bug 的唯一来源——**静默跳过 = 错误被吞掉**。
+
+像素对比抓不到它：空按钮和原版颜色几乎一致，整页差异只多 0.02%，只有"放大看"或"断言"能发现。
+
 #### 3.1 判断槽位是「居中」还是「有意偏移」
 
 写每个元素的 `margin` 之前，用**原版实测值**做基准（不是自己的估算值）：
