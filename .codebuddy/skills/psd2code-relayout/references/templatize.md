@@ -89,7 +89,47 @@ def norm(body):
 
 必须写 `background: var(--badge-bg) no-repeat 0px 4px;`。
 
-### 3. 伪元素的 z-index 出不了父元素
+### 3. 文本可能在深层 div 里，删除前必须先摘出来
+
+V1 稿的奖励标签是 4 层结构：
+
+```
+.points ▸ rect-N ▸ points-N ▸ <span>+10积分</span>
+```
+
+按"清空所有子 div"的方式合并，`<span>` 会随它的父 div 一起被删掉——实测 22 个标签的文字全部消失，整页 0.26% 差异。
+
+正确顺序：
+
+```python
+span = el.find("span")
+if span is not None:
+    span.extract()          # 先摘出来
+for d in list(el.find_all("div")):
+    d.decompose()
+if span is not None:
+    span["class"] = ["reward-tag__text"]
+    el.append(span)
+```
+
+### 4. 子层 z-index 高于文本时，用 `::before` 而不是 `background`
+
+如果背景条是定位元素且 `z-index` 高于容器里的文字，改成容器 `background` 会翻转层叠（背景必然在内容之下），出现差异。
+
+改用容器的 `::before` 并显式写回原来的 `z-index`，层叠行为不变，同样能省掉那个 div：
+
+```css
+.points::before {
+  content: ""; position: absolute; left: 0; top: 0;
+  width: 97px; height: 42px; z-index: 209;
+  background: url("images/rect-793d9d.png") no-repeat;
+}
+.points .reward-tag__text { position: absolute; left: 13px; top: 12px; z-index: 210; }
+```
+
+实测（V1，22 个标签）：`div` 478 → 434、CSS 规则 409 → 365、体积 −10.6%、整页 **maxΔ=0**。
+
+### 5. 伪元素的 z-index 出不了父元素
 
 `::before` 的 `z-index` 只在所属元素的层叠上下文内比较。如果某个装饰需要压到**父元素之外**的兄弟上，就不能用伪元素，得留成独立节点。
 
