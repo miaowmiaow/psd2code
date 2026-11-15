@@ -112,23 +112,18 @@ if span is not None:
     el.append(span)
 ```
 
-### 4. 背景条用 `background` 还是 `::before`：等价，任选
+### 4. 背景条能否并入容器：先比 z-index
 
-两种写法都实测过（V1，22 个标签），在**正确摘出文本**的前提下，都得到 `maxΔ=0`：
+两种写法都可能，但前提是**子层的 z-index 不高于文本**：
 
-```css
-/* 写法 A：容器背景 */
-.points { background: url("images/rect-793d9d.png") no-repeat; }
+| 场景 | 结论 |
+|---|---|
+| 文本容器也带 z-index（如 `points-N z=306` > `rect z=209`） | 改成容器 `background` 安全，实测 `maxΔ=0` |
+| 文本是静态节点（`z-index: auto`），背景条带 z（如 `btn rect z=285`） | **不要合并**，实测 0.14% 差异 |
 
-/* 写法 B：伪元素 */
-.points::before { content:""; position:absolute; left:0; top:0;
-                  width:97px; height:42px; z-index:209;
-                  background: url("images/rect-793d9d.png") no-repeat; }
-```
+第二种情况里，背景条原本绘制在文字之上（把字压住），改成容器背景会让文字浮上来。这是真实视觉差异，不该"顺手修正"。
 
-选择建议：子层有非零 `z-index` 或 `left/top` 偏移时，用 `::before`（能把几何原样搬过去，不必依赖容器的 `padding`）；子层就在 `(0,0)` 且尺寸与容器一致时，直接用 `background` 更省。
-
-**不要**因为这个差异去改阈值 —— 真正的风险在文本，不在层叠。
+写法选择：子层有非零 `left/top` 偏移时用 `::before`（几何能原样搬过去）；在 `(0,0)` 且尺寸一致时直接用 `background` 更省。
 
 ### 5. 伪元素的 z-index 出不了父元素
 
