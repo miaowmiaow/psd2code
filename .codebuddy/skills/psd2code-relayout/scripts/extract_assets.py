@@ -45,6 +45,11 @@ _COLLECT_JS = """() => {
   const images = [];
   const texts = [];
 
+  // 文本陷阱：span 不在容器的直接子级时，合并子层会把它连带删除。
+  // 同一个 span 只报一次（取最外层容器），避免嵌套重复计数。
+  const textTraps = [];
+  const trapped = new Set();
+
   [...document.querySelectorAll('div')].forEach((el, i) => {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return;
@@ -61,6 +66,28 @@ _COLLECT_JS = """() => {
       const urls = bg.split(/,(?=url\\()/).map(clean).filter(Boolean);
       images.push({node: i, cls, bbox, z, src: urls[0] || null,
                    extra_srcs: urls.slice(1)});
+    }
+
+    // 文本陷阱：span 嵌在更深的 div 里 → 合并子层前必须 extract
+    const deepSpan = el.querySelector('span');
+    if (deepSpan && deepSpan.parentElement !== el && !trapped.has(deepSpan)) {
+      trapped.add(deepSpan);
+      let depth = 0;
+      const chain = [];
+      let node = deepSpan.parentElement;
+      while (node && node !== el) {
+        depth += 1;
+        const c = (node.getAttribute('class') || '').split(/\\s+/).filter(Boolean)[0];
+        if (c) chain.push(c);
+        node = node.parentElement;
+      }
+      if (node === el && depth > 0) {
+        textTraps.push({
+          node: i, container: cls, depth,
+          chain: chain.reverse(),
+          text: (deepSpan.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 24),
+        });
+      }
     }
 
     const span = el.querySelector(':scope > span');
@@ -84,7 +111,7 @@ _COLLECT_JS = """() => {
   return {
     canvas: {width: document.documentElement.scrollWidth,
              height: document.documentElement.scrollHeight},
-    images, texts,
+    images, texts, textTraps,
   };
 }"""
 
@@ -193,6 +220,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "images": {name: n for name, n in src_counter.most_common() if n > 1},
             "texts": {text: n for text, n in text_counter.most_common() if n > 1},
         },
+        # 合并子层前必须把这些 span 先 extract 出来，否则会连带删除
+        "text_traps": raw.get("textTraps", []),
         "note": "扁平素材池：无父子关系，供视觉重排时按 bbox 取用；原 DOM 结构不作依据。",
     }
     (out_dir / "assets.json").write_text(
@@ -209,6 +238,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "texts": len(texts),
         "unique_image_files": len(src_counter),
         "reused_image_files": sum(1 for n in src_counter.values() if n > 1),
+        "text_traps": len(raw.get("textTraps", [])),
         "preview_tiles": tiled,
         "preview": str(preview) if tiled else None,
     }, ensure_ascii=False))

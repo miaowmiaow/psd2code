@@ -112,22 +112,23 @@ if span is not None:
     el.append(span)
 ```
 
-### 4. 子层 z-index 高于文本时，用 `::before` 而不是 `background`
+### 4. 背景条用 `background` 还是 `::before`：等价，任选
 
-如果背景条是定位元素且 `z-index` 高于容器里的文字，改成容器 `background` 会翻转层叠（背景必然在内容之下），出现差异。
-
-改用容器的 `::before` 并显式写回原来的 `z-index`，层叠行为不变，同样能省掉那个 div：
+两种写法都实测过（V1，22 个标签），在**正确摘出文本**的前提下，都得到 `maxΔ=0`：
 
 ```css
-.points::before {
-  content: ""; position: absolute; left: 0; top: 0;
-  width: 97px; height: 42px; z-index: 209;
-  background: url("images/rect-793d9d.png") no-repeat;
-}
-.points .reward-tag__text { position: absolute; left: 13px; top: 12px; z-index: 210; }
+/* 写法 A：容器背景 */
+.points { background: url("images/rect-793d9d.png") no-repeat; }
+
+/* 写法 B：伪元素 */
+.points::before { content:""; position:absolute; left:0; top:0;
+                  width:97px; height:42px; z-index:209;
+                  background: url("images/rect-793d9d.png") no-repeat; }
 ```
 
-实测（V1，22 个标签）：`div` 478 → 434、CSS 规则 409 → 365、体积 −10.6%、整页 **maxΔ=0**。
+选择建议：子层有非零 `z-index` 或 `left/top` 偏移时，用 `::before`（能把几何原样搬过去，不必依赖容器的 `padding`）；子层就在 `(0,0)` 且尺寸与容器一致时，直接用 `background` 更省。
+
+**不要**因为这个差异去改阈值 —— 真正的风险在文本，不在层叠。
 
 ### 5. 伪元素的 z-index 出不了父元素
 

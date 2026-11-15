@@ -67,11 +67,13 @@ python scripts/extract_assets.py <html_dir>  # 扁平素材池
 |---|---|
 | `slices/slice-*.png` | **结构判断的唯一依据**，逐张看完 |
 | `base.png` | 全页基准图 |
-| `assets.json` | 扁平素材池：`images[]`（含 bbox / z / 复用计数）、`texts[]`（含样式）、`palette` |
+| `assets.json` | 扁平素材池：`images[]`（含 bbox / z / 复用计数）、`texts[]`（含样式）、`palette`、`text_traps[]` |
 | `assets_preview.png` | 素材总览图，肉眼核对素材种类与重复情况 |
 | `dom.json` | **仅用于按 bbox 定位素材**，不要读它的父子关系 |
 
 `assets.json` 是刻意做成**扁平**的：不带 parent/children。任何布局方案只引用素材 `id`，不回头读 DOM。
+
+`text_traps` 是合并前的必查项：列出「文字藏在容器内部更深层」的位置。实测 V1 稿 138 个文本里有 97 个属于这种情况——**合并任何容器前，先假设文本在深层，必须 `span.extract()` 再删子层**，否则文字会连带消失且像素校验才会发现。
 
 ### Step 2 · 从截图设计骨架
 
@@ -134,7 +136,7 @@ python scripts/verify_page.py index_optimized.html index_ai.html \
 
 ## 硬约束
 
-1. **文字永远是 DOM 文本**，不转图。
+1. **文字永远是 DOM 文本**，不转图；合并容器前先查 `text_traps`，把 `span` 摘出来再删子层。
 2. 结构**只从截图得出**；`dom.json` 的父子关系不作为依据。
 3. 素材只引用不重切；同一素材多次复用时共用同一文件。
 4. 每次落地改动要跑 `verify_page.py`，并按区块记录差异。
