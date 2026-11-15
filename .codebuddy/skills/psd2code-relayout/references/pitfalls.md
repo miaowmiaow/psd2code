@@ -167,23 +167,65 @@ canvas = canvas.crop((-min_x, -min_y, -min_x+w, -min_y+h))   # 最后裁回列�
 
 判定信号：一个带背景的元素用了负 `margin-top`，且它前面的兄弟元素是**文字或图标**——大概率会盖住。
 
-## 14. 合图前先确认源文件名存在
+## 14. 合图必须用「缺失即失败」的写法，并在合成后验证输出
 
-`ui-btn-back.png`（"去回帖"按钮）合成后是**纯蓝底、没有文字**。
+**同一个错误犯过两次**，都是文件名记错、文件不存在、静默跳过、只合到底图：
 
-原因：合成时写的文件名是 `quhuitie-3f2a4c.png`，实际产物里是 `quhuitie-3f07af.png`。文件不存在 → `compose()` 里 `if not f.exists(): continue` 静默跳过 → 只合到了底图。
+| 按钮 | 我写的文件名 | 实际文件名 | 结果 |
+|---|---|---|---|
+| 去回帖 | `quhuitie-3f2a4c.png` | `quhuitie-3f07af.png` | 纯蓝底无字 |
+| 待助力 | `daizhuli-8b2e91.png` | `daizhuli-a33b2c.png` | 纯蓝底无字 |
 
-**像素校验发现不了这个问题**：它只会报告"这里和原版有差异"，不会说"文案丢了"。而截图对比里，一个空按钮的颜色和原版几乎一致，很容易被忽略。
+根因只有一条：`compose()` 里写了 `if not f.exists(): continue`。
 
-正确做法：
+### 必须使用的写法（不要改）
 
 ```python
-missing = [n for n in names if not (images_dir / n).exists()]
-if missing:
-    raise SystemExit(f"素材缺失：{missing}")
+def compose(images_dir: Path, names: set[str], x0, y0, x1, y1, out: str):
+    """合成多层叠图。素材缺失立即失败——绝不静默跳过。"""
+    # 1) 先验文件，缺一个就停
+    missing = [n for n in sorted(names) if not (images_dir / n).exists()]
+    if missing:
+        raise SystemExit(f"素材缺失，检查文件名：{missing}")
+
+    sel = [i for i in assets if i['src'] in names
+           and x0 <= i['bbox'][0] < x1 and y0 <= i['bbox'][1] < y1]
+    # 2) 再验「命中的层数」，少一层也是错
+    if len({i['src'] for i in sel}) != len(names):
+        got = {i['src'] for i in sel}
+        raise SystemExit(f"图层未命中：缺 {sorted(names - got)}")
+
+    ...  # 合成
 ```
 
-在 `compose()` 开头就抛错，而不是 `continue`。——**静默跳过是这类 bug 的唯一来源**。
+两个检查缺一不可：
+
+- **文件存在**：挡住文件名写错；
+- **图层命中**：挡住坐标范围写错（文件在、但不在这个 bbox 里）。
+
+### 合成后必须验证输出
+
+尺寸正确 ≠ 合成正确。文字类合成图要检查「文字层到底有没有进去」：
+
+```python
+im = Image.open(images_dir / out).convert('RGBA')
+px = im.load()
+white = sum(1 for y in range(im.height) for x in range(im.width)
+            if px[x, y][:3] == (255, 255, 255) and px[x, y][3] > 200)
+print(out, im.size, '白字像素=', white)   # 纯底图 ≈ 0~30；有文字 ≈ 300+
+```
+
+实测：`ui-btn-pending` 空图 32 个白像素，修好后 531 个。
+
+注意这个指标只适用于**白字按钮**。黑字带白描边的按钮（如 `ui-3btn-*`）白像素只有 20~50，`ui-3btn-1` 是 22 但文字完好——**不要用统一阈值判定，要放大看一眼**。
+
+### 为什么像素对比抓不到
+
+- 一个空按钮的颜色和原版几乎一致，整页差异只多 0.02%；
+- `verify_page.py` 只会说"这里不一样"，不会说"文案没了"；
+- 视觉对比时，蓝色按钮有没有白字，在缩略图里看不出来。
+
+**这类错误只能靠合成阶段的断言拦住。**
 
 ## 15. 写格子结构前先数资源层数，不要凭"看起来该有几个元素"
 
