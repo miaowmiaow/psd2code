@@ -12,7 +12,17 @@ import shutil
 import sys
 import time
 
+# 本文件既可被 psd_to_code.py 通过 importlib 加载，也可独立运行；
+# 独立运行时 sys.path[0] 是 scripts/preview，需补上 scripts/ 才能 import common.*
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SCRIPTS_DIR = os.path.join(ROOT, 'scripts')
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from common.log_config import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
+
 TEMPLATE_DIR = os.path.join(ROOT, 'scripts', 'preview')
 
 def default_output_dir():
@@ -32,7 +42,7 @@ def install(target_dir=None):
         src = os.path.join(TEMPLATE_DIR, f)
         dst = os.path.join(target_dir, f)
         shutil.copyfile(src, dst)
-        print(f'已复制 {src} -> {dst}')
+        logger.info(f'已复制 {src} -> {dst}')
 
     # 强制刷新 preview.js 缓存：每次部署都更新 preview.html 中的 js 版本参数
     preview_path = os.path.join(target_dir, 'preview.html')
@@ -49,9 +59,9 @@ def install(target_dir=None):
             )
             with open(preview_path, 'w', encoding='utf-8') as f:
                 f.write(preview_text)
-            print(f'已更新 preview.js 版本参数: v={version}')
+            logger.info(f'已更新 preview.js 版本参数: v={version}')
         except Exception as e:
-            print(f'更新 preview.js 版本参数失败：{e}')
+            logger.info(f'更新 preview.js 版本参数失败：{e}')
 
     # 如果目标目录包含 index.html，嵌入其内容到 preview.html 以规避 file:// 同源限制
     index_path = os.path.join(target_dir, 'index.html')
@@ -62,7 +72,8 @@ def install(target_dir=None):
                 index_html = f.read()
             # 内联 CSS 和图片资源，替换相对引用为 data: URI 或内置样式
             def inline_resources(html, base_dir):
-                import re, base64
+                import re
+                import base64
 
                 # inline linked CSS (match link tag with rel=stylesheet in any attribute order)
                 def repl_link(m):
@@ -126,7 +137,6 @@ def install(target_dir=None):
 
             index_html = inline_resources(index_html, target_dir)
             # 将 index.html 原文放入一个安全的文本脚本节点中
-            marker = '\n<!-- __EMBEDDED_INDEX_PLACEHOLDER__ -->\n'
             embed_tag = f"<script id=\"__embedded_index\" type=\"text/plain\">{index_html}</script>"
             with open(preview_path, 'r', encoding='utf-8') as f:
                 preview_text = f.read()
@@ -138,10 +148,13 @@ def install(target_dir=None):
                     preview_text = preview_text + embed_tag
                 with open(preview_path, 'w', encoding='utf-8') as f:
                     f.write(preview_text)
-                print(f'已将 index.html 嵌入到 {preview_path}（用于离线预览）')
+                logger.info(f'已将 index.html 嵌入到 {preview_path}（用于离线预览）')
         except Exception as e:
-            print(f'嵌入 index.html 到 preview.html 失败：{e}')
+            logger.info(f'嵌入 index.html 到 preview.html 失败：{e}')
 
 if __name__ == '__main__':
+    from common.log_config import configure
+
+    configure()
     td = sys.argv[1] if len(sys.argv)>1 else None
     install(td)

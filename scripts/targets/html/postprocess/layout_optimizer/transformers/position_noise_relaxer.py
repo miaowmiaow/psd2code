@@ -81,6 +81,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -280,7 +284,7 @@ class PositionNoiseRelaxer:
         self.stats["position_relaxed_groups"] = len(new_merged_groups)
         self.stats["position_relaxed_classes"] = relaxed_classes_count
 
-        print(
+        logger.info(
             f"   - 位置噪声归一: {len(new_merged_groups)} 组（覆盖 {relaxed_classes_count} 个类）"
         )
 

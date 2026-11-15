@@ -27,8 +27,8 @@ Photoshop 的组级合成结果。
    expanded_bbox = expand(grp_bbox, expand)
 
 2. 手动渲染（保留溢出）
-   canvas_manual = render_group_expanded(group, grp_bbox, expand)
-   —— 内部用 GroupRenderer 在 expanded_bbox 画布上逐层叠加
+   canvas_manual = _render_group_with_hybrid_strategy(group, grp_bbox, expand)
+   —— 在 expanded_bbox 画布上逐层叠加（LayerExporter 私有方法）
 
 3. PS 原生组级合成（仅 bbox 内高质量）
    canvas_ps = group_layer.composite(viewport=grp_bbox)
@@ -61,21 +61,21 @@ Photoshop 的组级合成结果。
 sub_img = sub_grp.composite(viewport=grp_bbox)
 ```
 
-**不要** 改回"递归调用 `_render_group_expanded` + 裁切"。
+**不要** 改回"递归调用 `_render_group_with_hybrid_strategy` + 裁切"。
 历史经验：这样做在"solgan/副标题"这类场景会沿圆角轮廓多出 ~75px/行 的描边。
 只有 `composite()` 正确复现了 PS 的组级效果裁切行为。
 
 ## 所需工具
 
-- `core/render/layer_renderer.GroupRenderer.render_group_expanded(...)`
+- `core/extract/layer_exporter.py::_render_group_with_hybrid_strategy(...)`（扩展画布手动渲染 + composite 覆盖）
 - `group_layer.composite(viewport=bbox)`（psd-tools 原生）
 - `common.image_utils.ImageArrayUtils.pil_to_float_array / float_array_to_pil`
 
 ## 硬约束（不要破坏）
 
 1. **子组必须用 `composite(viewport=grp_bbox)` 渲染**，不得降级为手动递归。
-2. **外溢效果必须走混合策略**：`_render_group_expanded` + composite 覆盖。
-3. **不要重构 `_merge_group_as_image` 的"效果溢出分支"为单边方案**。
+2. **外溢效果必须走混合策略**：`_render_group_with_hybrid_strategy` + composite 覆盖。
+3. **不要重构 `_render_group_with_hybrid_strategy` 的"效果溢出分支"为单边方案**。
 
 违反以上任何一条都很可能引入像素级回归。修改前请先跑一次 baseline diff。
 详见 [`../05-conventions/known-pitfalls.md`](../05-conventions/known-pitfalls.md)。

@@ -22,7 +22,7 @@ PR-1 当前阶段：**完全透传**到 ``common.semantic.extract_semantic_token
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from common.semantic import extract_semantic_token

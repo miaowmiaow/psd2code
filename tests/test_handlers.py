@@ -5,9 +5,8 @@ All tests use mock layer objects and mock LayerExporter (no PSD I/O required).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from core.extract.handlers import (
     HandlerContext,

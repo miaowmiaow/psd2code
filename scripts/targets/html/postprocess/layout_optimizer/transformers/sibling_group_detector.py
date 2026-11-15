@@ -61,10 +61,14 @@ flex-wrap: wrap; gap`` 等 CSS。下游开发拿到 HTML 可以直接：
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from ..utils.css_parser import CSSParser
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ class SiblingGroupDetector:
     # ------------------------------------------------------------------
 
     def run(self):
-        print("\n  📋 步骤1.5：同质兄弟分组（v-list）...")
+        logger.info("\n  📋 步骤1.5：同质兄弟分组（v-list）...")
 
         # 采集所有可能作为父容器的元素：
         # - #canvas（根容器，最常见的"平铺列表"场景）
@@ -176,7 +180,7 @@ class SiblingGroupDetector:
                 self._process_container(container)
             except Exception as exc:  # noqa: BLE001
                 name = container.get('id') or container.get('data-name') or 'unknown'
-                print(f"    ⚠️  {name} 同质兄弟分组失败: {exc}")
+                logger.warning(f"    ⚠️  {name} 同质兄弟分组失败: {exc}")
                 if self.config.debug:
                     import traceback
                     traceback.print_exc()
@@ -184,12 +188,12 @@ class SiblingGroupDetector:
         if self.stats['sibling_lists_created'] > 0:
             grid_n = self.stats.get('grid_lists_created', 0)
             extra = f"，其中 {grid_n} 个用 CSS Grid" if grid_n else ""
-            print(
+            logger.info(
                 f"    ✅ 同质兄弟分组：创建 {self.stats['sibling_lists_created']} 个 v-list，"
                 f"包裹 {self.stats['sibling_items_wrapped']} 个节点{extra}"
             )
         else:
-            print("    （无同质兄弟序列被识别）")
+            logger.info("    （无同质兄弟序列被识别）")
 
     # ------------------------------------------------------------------
     # 容器采集
@@ -253,12 +257,12 @@ class SiblingGroupDetector:
                 continue
             if not self._sizes_close(bucket):
                 if self.config.debug:
-                    print(f"    [debug] {class_root}: 尺寸差异 > {self.config.size_tolerance}, 跳过")
+                    logger.info(f"    [debug] {class_root}: 尺寸差异 > {self.config.size_tolerance}, 跳过")
                 continue
             grid = self._detect_grid(bucket)
             if grid is None:
                 if self.config.debug:
-                    print(f"    [debug] {class_root}: 不是规则网格, 跳过")
+                    logger.info(f"    [debug] {class_root}: 不是规则网格, 跳过")
                 continue
 
             # 通过所有判定，包一层 v-list
@@ -407,7 +411,7 @@ class SiblingGroupDetector:
         # 对"中间有缺口的列表"故意不识别，避免开发拿到错位的 flex-wrap。
         if cols * rows != n:
             if cfg.debug:
-                print(f"    [debug] grid: cols*rows ({cols}*{rows}) != n ({n})")
+                logger.info(f"    [debug] grid: cols*rows ({cols}*{rows}) != n ({n})")
             return None
 
         # 3) 计算 col_gap / row_gap
@@ -418,11 +422,11 @@ class SiblingGroupDetector:
             return None
         if not (cfg.min_gap_px <= col_gap <= cfg.max_gap_px):
             if cfg.debug:
-                print(f"    [debug] grid: col_gap {col_gap} out of range")
+                logger.info(f"    [debug] grid: col_gap {col_gap} out of range")
             return None
         if not (cfg.min_gap_px <= row_gap <= cfg.max_gap_px):
             if cfg.debug:
-                print(f"    [debug] grid: row_gap {row_gap} out of range")
+                logger.info(f"    [debug] grid: row_gap {row_gap} out of range")
             return None
 
         # 4) 检查每个 item 的 (left, top) 都落在某个 (lefts[i], tops[j]) 簇上
@@ -432,7 +436,7 @@ class SiblingGroupDetector:
             ri = self._find_cluster_idx(it.top, tops, tol)
             if ci is None or ri is None:
                 if cfg.debug:
-                    print(f"    [debug] grid: item {it.css_class} not on grid cluster")
+                    logger.info(f"    [debug] grid: item {it.css_class} not on grid cluster")
                 return None
             sorted_items.append((ri, ci, it))
 
@@ -440,7 +444,7 @@ class SiblingGroupDetector:
         slots = {(ri, ci) for ri, ci, _ in sorted_items}
         if len(slots) != n:
             if cfg.debug:
-                print(f"    [debug] grid: duplicate slots ({len(slots)} unique vs {n} items)")
+                logger.info(f"    [debug] grid: duplicate slots ({len(slots)} unique vs {n} items)")
             return None
 
         # 6) 按 row-major 排序输出
@@ -623,7 +627,7 @@ class SiblingGroupDetector:
         self.stats['sibling_items_wrapped'] += len(items)
 
         layout_kw = "grid" if is_grid else "flex-wrap"
-        print(
+        logger.info(
             f"    📋 v-list 创建: {class_root}-list "
             f"({grid['rows']}行×{grid['cols']}列, n={len(items)}, "
             f"row-gap={int(round(grid['row_gap']))}px, "

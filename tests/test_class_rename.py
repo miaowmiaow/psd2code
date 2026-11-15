@@ -9,7 +9,6 @@
   - VirtualWrapperRename._find_semantic_prefix
   - VirtualWrapperRename.run() 端到端
 """
-import pytest
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.semantic_class_rename import (

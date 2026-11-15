@@ -7,17 +7,23 @@
 - 外描边 / 外发光 / 投影会自动扩展画布，返回新的 bbox
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
 
 from common.image_utils import ImageArrayUtils
+from common.log_config import get_logger
 
 from .stroke_renderer import StrokeRenderer
 from .shadow_renderer import DropShadowRenderer, InnerShadowRenderer
 from .glow_renderer import OuterGlowRenderer, InnerGlowRenderer
 from .overlay_renderer import ColorOverlayRenderer, GradientOverlayRenderer
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型检查（draw: 'ImageDraw.ImageDraw' 注解）
+    from PIL import ImageDraw
+
+logger = get_logger(__name__)
 
 
 # ======================================================================
@@ -98,8 +104,6 @@ def render_layer_with_effects(layer: Any) -> tuple[Image.Image, tuple[int, int, 
             if not is_effect_active(effect, layer):
                 continue
 
-            name = str(effect)
-
             # 使用专门的渲染器
             if DropShadowRenderer.can_render(effect):
                 arr = DropShadowRenderer.render(effect, ext_alpha, new_h, new_w, expand)
@@ -171,7 +175,7 @@ def render_layer_with_effects(layer: Any) -> tuple[Image.Image, tuple[int, int, 
         return result_img, new_bbox
 
     except Exception as e:
-        print(f"      ⚠️  效果渲染失败: {e}")
+        logger.warning(f"      ⚠️  效果渲染失败: {e}")
         return None
 
 
@@ -287,7 +291,7 @@ def render_layer_with_effects_on_image(
         return result_img, new_bbox
 
     except Exception as e:
-        print(f"      ⚠️  效果渲染(on_image)失败: {e}")
+        logger.warning(f"      ⚠️  效果渲染(on_image)失败: {e}")
         return None
 
 
@@ -556,5 +560,5 @@ def _render_shape_base_from_fill(layer: Any) -> Image.Image | None:
         return rgba
 
     except Exception as e:
-        print(f"      ⚠️  shape 基础图自渲染失败: {e}")
+        logger.warning(f"      ⚠️  shape 基础图自渲染失败: {e}")
         return None

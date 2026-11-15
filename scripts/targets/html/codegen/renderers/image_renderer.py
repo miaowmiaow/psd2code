@@ -38,11 +38,11 @@ class ImageRenderer(NodeRenderer):
             # 1:1 像素映射，最大限度保留 PSD 渲染时已有的边缘抗锯齿质量
             # （避免 `100% 100%` 触发的二次缩放管道破坏边缘像素）。
             if not self._png_matches_css(layer):
-                css += f'    background-size: 100% 100%;\n'
-            css += f'    background-repeat: no-repeat;\n'
-            css += f'    background-position: left top;\n'
+                css += '    background-size: 100% 100%;\n'
+            css += '    background-repeat: no-repeat;\n'
+            css += '    background-position: left top;\n'
 
-        css += f'}}'
+        css += '}'
         self.ctx.css_rules.append(css)
 
         html = f'{pad}<div id="{layer_id}" class="{class_name}" data-name="{_esc(layer["name"])}" data-type="image">\n'

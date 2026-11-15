@@ -23,20 +23,35 @@ from typing import Any
 from bs4 import BeautifulSoup, Tag
 import re
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def absorb_background_layers_safe(
     html_content: str, css_rules: dict[str, dict[str, str]]
 ) -> tuple[str, dict[str, dict[str, str]], dict[str, Any]]:
-    """安全的背景层吸收优化。
+    """安全的背景层吸收优化（HTML 字符串接口）。"""
+    soup = BeautifulSoup(html_content, "html.parser")
+    has_containers, stats = absorb_background_layers_in_soup(soup, css_rules)
+    if not has_containers:
+        return html_content, css_rules, stats
+    return str(soup), css_rules, stats
+
+
+def absorb_background_layers_in_soup(
+    soup: BeautifulSoup,
+    css_rules: dict[str, dict[str, str]],
+) -> tuple[bool, dict[str, Any]]:
+    """在已有 DOM 上执行背景层吸收，避免序列化后再次解析。
     
     Args:
-        html_content: HTML 文本
+        soup: 已解析的 BeautifulSoup DOM
         css_rules: CSS 规则字典 {selector: {prop: value}}
     
     Returns:
-        (优化后的 HTML, 更新后的 CSS 规则, 统计信息)
+        (是否找到容器, 统计信息)
     """
-    soup = BeautifulSoup(html_content, "html.parser")
     stats = {
         "bg_layers_absorbed": 0,
         "bg_elements_removed": 0,
@@ -48,7 +63,7 @@ def absorb_background_layers_safe(
     container_info_map = _mark_containers(soup)
     
     if not container_info_map:
-        return html_content, css_rules, stats
+        return False, stats
     
     # 步骤 2：处理每个容器中的背景层
     for container_id, container_info in container_info_map.items():
@@ -66,7 +81,7 @@ def absorb_background_layers_safe(
     # 步骤 5：清理未使用的 CSS 规则
     _cleanup_unused_css_rules(soup, css_rules, stats)
     
-    return str(soup), css_rules, stats
+    return True, stats
 
 
 def _mark_containers(soup: BeautifulSoup) -> dict[str, dict[str, Any]]:
@@ -139,13 +154,13 @@ def _absorb_in_container_v2(
     stats["containers_processed"] += 1
     
     # 收集 z-index 信息
-    z_info: dict[Tag, int] = {}
+    z_info: dict[int, int] = {}
     for child in direct_children:
         classes = child.get("class", [])
         if not classes:
             continue
         z_val = _get_z_index_from_css(classes, css_rules)
-        z_info[child] = z_val
+        z_info[id(child)] = z_val
     
     if not z_info:
         return
@@ -188,7 +203,7 @@ def _absorb_in_container_v2(
         if not classes:
             continue
         
-        z_val = z_info[child]
+        z_val = z_info[id(child)]
         if z_val != min_z:
             continue  # 不是最小 z-index
         
@@ -245,7 +260,21 @@ def _perform_absorption(
     soup: BeautifulSoup,
     stats: dict[str, Any],
 ) -> None:
-    """执行单个背景层的吸收。"""
+    """执行单个背景层的吸收。
+
+    前置条件：``bg_elem`` 必须能安全删除。若它还有子元素，吸收会变成
+    "容器多了 background，子层又还在"——同一张图绘制两遍，且子层的
+    opacity / blend-mode 与容器不同时会出现合成错误，因此直接跳过。
+    """
+    if bg_elem is not None:
+        has_content_children = any(
+            getattr(child, "name", None) == "div"
+            for child in bg_elem.find_all(recursive=False)
+        )
+        if has_content_children:
+            logger.warning(f"⚠️  保留背景层（有子内容），跳过吸收: {bg_first_class}")
+            return
+
     # 确保容器的 CSS 规则存在
     container_css_selector = f'[data-absorb-id="{container_id}"]'
     if container_css_selector not in css_rules:
@@ -324,27 +353,15 @@ def _perform_absorption(
         else:
             # 容器使用分散子属性形式，直接写 background-position
             container_rule["background-position"] = pos_str
-    
-        # 从 HTML 中删除背景层元素
-        # 但首先检查是否有非背景子元素（防止删除时丢失内容）
-        has_content_children = False
-        if bg_elem:
-            for child in bg_elem.find_all(recursive=False):
-                if getattr(child, 'name', None) == 'div':
-                    has_content_children = True
-                    break
-        
-        if has_content_children:
-            # 有子元素，不删除，避免丢失内容
-            import sys
-            sys.stderr.write(f"⚠️  保留背景层（有子内容）: {bg_first_class}\n")
-        else:
-            # 无子元素，安全删除
-            if bg_elem and bg_elem.parent:
-                bg_elem.decompose()
-            
-            stats["bg_layers_absorbed"] += 1
-            stats["bg_elements_removed"] += 1
+
+    # 删除背景层元素并计数。
+    # ⚠️ 必须无条件执行（不能放进上面的"有偏移"分支）：底图绝大多数是
+    # left:0/top:0，若只在有偏移时删除，会出现"容器已有 background + 子层
+    # 仍在"的重复绘制，且 stats 谎报 0 吸收（历史 bug，2026-11 修复）。
+    if bg_elem is not None and bg_elem.parent is not None:
+        bg_elem.decompose()
+        stats["bg_layers_absorbed"] += 1
+        stats["bg_elements_removed"] += 1
 
 
 def _merge_absorb_css_rules(

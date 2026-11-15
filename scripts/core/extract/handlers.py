@@ -18,6 +18,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from .layer_exporter import LayerExporter
 
@@ -88,11 +92,11 @@ class ClippingGroupHandler(LayerHandler):
         # 隐藏/透明 base → 跳过整组
         if not base_layer.visible:
             exp.skipped_count += 1 + len(clipped_layers)
-            print(f"{'  ' * depth}🚫 {base_name} (隐藏剪切蒙版组，已跳过)")
+            logger.info(f"{'  ' * depth}🚫 {base_name} (隐藏剪切蒙版组，已跳过)")
             return HandlerResult(handled=True)
         if base_layer.opacity == 0:
             exp.skipped_count += 1 + len(clipped_layers)
-            print(f"{'  ' * depth}🚫 {base_name} (opacity=0剪切蒙版组，已跳过)")
+            logger.info(f"{'  ' * depth}🚫 {base_name} (opacity=0剪切蒙版组，已跳过)")
             return HandlerResult(handled=True)
 
         # 所有 clipped 都被隐藏 → 仅处理 base
@@ -117,7 +121,7 @@ class ClippingGroupHandler(LayerHandler):
 
         # base 是组：组本身递归导出，clipped 层用 base group alpha 剪裁后独立导出
         if base_layer.is_group():
-            print(f"{'  ' * depth}📁 {base_name} (组，有剪切蒙版附着)")
+            logger.info(f"{'  ' * depth}📁 {base_name} (组，有剪切蒙版附着)")
 
             grp_abs_left = base_layer.left
             grp_abs_top = base_layer.top
@@ -201,9 +205,9 @@ class InvisibleLayerHandler(LayerHandler):
         exp.skipped_count += 1
         pad = '  ' * ctx.depth
         if not layer.visible:
-            print(f"{pad}🚫 {layer_name} (隐藏，已跳过)")
+            logger.info(f"{pad}🚫 {layer_name} (隐藏，已跳过)")
         else:
-            print(f"{pad}🚫 {layer_name} (opacity=0，已跳过)")
+            logger.info(f"{pad}🚫 {layer_name} (opacity=0，已跳过)")
         return HandlerResult(handled=True)
 
 
@@ -237,7 +241,7 @@ class GroupHandler(LayerHandler):
         from .compose_cluster import decide_group_merge, describe_decision
 
         decision = decide_group_merge(layer)
-        print(f"{'  ' * depth}📁 {layer_name} → {describe_decision(decision)}")
+        logger.info(f"{'  ' * depth}📁 {layer_name} → {describe_decision(decision)}")
 
         # ── 路径 1: merge_full —— 整组合成单图 ────────────────────────────
         if decision.action == "merge_full":
@@ -246,7 +250,7 @@ class GroupHandler(LayerHandler):
             )
             if merged:
                 return HandlerResult(produced=[merged], handled=True)
-            print(f"{'  ' * depth}  ⚠️  merge_full 失败，回退逐层导出")
+            logger.warning(f"{'  ' * depth}  ⚠️  merge_full 失败，回退逐层导出")
             # 失败 fallthrough 到默认递归路径
 
         # ── 路径 2: merge_with_text_kept —— 非文本合成 + 文本独立 ─────────
@@ -257,7 +261,7 @@ class GroupHandler(LayerHandler):
                 parent_left=layer.left, parent_top=layer.top,
             )
             if merged_bg_info is None:
-                print(f"{'  ' * depth}  ⚠️  merge_with_text_kept 失败，回退逐层导出")
+                logger.warning(f"{'  ' * depth}  ⚠️  merge_with_text_kept 失败，回退逐层导出")
 
         # ── 路径 3: merge_partial —— 按 PSD sibling 顺序交错处理 ───────────
         # 关键设计：cluster 的合成图必须分配到它在 PSD 中"最高 idx 成员"
@@ -307,7 +311,7 @@ class GroupHandler(LayerHandler):
                 constrained_bottom = min(exp.canvas_height, grp_abs_top_orig + grp_height_orig)
                 grp_width = constrained_right - grp_abs_left
                 grp_height = constrained_bottom - grp_abs_top
-                print(f"{'  ' * depth}  ⚠️  组超出画布，约束 bbox: "
+                logger.warning(f"{'  ' * depth}  ⚠️  组超出画布，约束 bbox: "
                       f"({grp_abs_left_orig},{grp_abs_top_orig},{grp_width_orig}x{grp_height_orig}) → "
                       f"({grp_abs_left},{grp_abs_top},{grp_width}x{grp_height})")
 
@@ -389,7 +393,7 @@ class GroupHandler(LayerHandler):
                                 pass
 
             if not partial_did_succeed:
-                print(f"{'  ' * depth}  ⚠️  merge_partial 全部失败，回退逐层导出")
+                logger.warning(f"{'  ' * depth}  ⚠️  merge_partial 全部失败，回退逐层导出")
                 children = exp.export_layers(
                     layer, full_name, depth + 1,
                     parent_left=grp_abs_left_orig,
@@ -430,7 +434,7 @@ class GroupHandler(LayerHandler):
             offset_x = grp_abs_left - grp_abs_left_orig
             offset_y = grp_abs_top - grp_abs_top_orig
             if offset_x != 0 or offset_y != 0:
-                print(f"{'  ' * depth}  🔧 调整子图层坐标偏移: ({-offset_x}, {-offset_y})")
+                logger.info(f"{'  ' * depth}  🔧 调整子图层坐标偏移: ({-offset_x}, {-offset_y})")
                 exp._adjust_children_offset(children, -offset_x, -offset_y)
 
         # ── pop 组 mask ──

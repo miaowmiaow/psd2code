@@ -90,6 +90,27 @@ class SimpleNamer:
         # 自然不冲突。
         self._sibling_seq: dict[tuple[int, str], dict[int, int]] = {}
 
+        # 语义 token 缓存：(id(parent), id(layer)) → semantic。
+        # 兄弟去重要为每个 layer 扫一遍 siblings，逐个算 semantic；若不缓存，
+        # 每层都会重复构建 DomContext（含父语义递归解析），复杂度退化为
+        # O(兄弟数 × 层数)，在几百层的 PSD 上会成为 codegen 的主要耗时。
+        # 仅缓存带稳定 layer_id 的对象，并持有引用避免 Python 复用对象 id。
+        self._semantic_cache: dict[tuple[int, int], str] = {}
+        self._semantic_cache_refs: dict[
+            tuple[int, int], tuple[Optional[dict[str, Any]], dict[str, Any]]
+        ] = {}
+
+        # 兄弟序号索引：(id(parent), id(siblings)) → {semantic: (对象→序号, layer_id→序号)}。
+        # 同一 parent 的 siblings 列表会被它的每个子层各问一次，逐次重扫是
+        # O(兄弟数²)；这里首次调用建表，后续直接查。持有引用避免 id 复用。
+        self._sibling_order_cache: dict[
+            tuple[int, int], dict[str, tuple[dict[int, int], dict[Any, int]]]
+        ] = {}
+        self._sibling_order_refs: dict[
+            tuple[int, int],
+            tuple[Optional[dict[str, Any]], list[dict[str, Any]]],
+        ] = {}
+
         # 语义命名流水线：与 utils.make_image_filename 共用同一进程级 resolver
         # —— 1) 保证同一图层在 class 名 / 图片文件名里映射一致；
         #     2) report 集中在一处，便于在 codegen 末尾一次性写盘。
@@ -115,11 +136,7 @@ class SimpleNamer:
 
         # 2) 语义 token
         ltype = layer.get("type") or layer.get("ltype") or "group"
-        name = layer.get("name", "") or ""
-        dom_ctx = self._build_dom_context(layer, parent)
-        semantic = self._resolver.resolve_token(
-            name, ltype, layer_id=layer_id, dom_context=dom_ctx,
-        ) or _LTYPE_FALLBACK.get(ltype, "node")
+        semantic = self._semantic_of(layer, parent)
 
         # 3) 同级兄弟去重序号
         sibling_index = self._compute_sibling_index(layer, parent, siblings, semantic)
@@ -142,6 +159,39 @@ class SimpleNamer:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _semantic_of(
+        self,
+        layer: dict[str, Any],
+        parent: Optional[dict[str, Any]],
+    ) -> str:
+        """算出 layer 的语义 token（带缓存）。
+
+        语义只取决于 ``(layer 自身字段, parent 的尺寸/children)``，同一组对象
+        下重复求值结果恒定，因此按对象身份缓存，并持有引用避免 ``id`` 复用。
+        兄弟去重扫描会为每个 sibling 反复求语义，这里命中后即退化为一次
+        dict 查询，避免重复构建 DomContext。
+        """
+        layer_id = layer.get("id")
+        parent_key = id(parent) if parent is not None else 0
+        cache_key = (parent_key, id(layer))
+
+        if layer_id is not None:
+            cached = self._semantic_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        ltype = layer.get("type") or layer.get("ltype") or "group"
+        name = layer.get("name", "") or ""
+        dom_ctx = self._build_dom_context(layer, parent)
+        semantic = self._resolver.resolve_token(
+            name, ltype, layer_id=layer_id, dom_context=dom_ctx,
+        ) or _LTYPE_FALLBACK.get(ltype, "node")
+
+        if layer_id is not None:
+            self._semantic_cache[cache_key] = semantic
+            self._semantic_cache_refs[cache_key] = (parent, layer)
+        return semantic
 
     def _build_dom_context(
         self,
@@ -265,31 +315,56 @@ class SimpleNamer:
                 bucket[layer_id] = index
             return index
 
-        # 有 siblings：按 siblings 中出现顺序、相同 semantic 的顺位决定
-        order = 0
-        for sib in siblings:
-            sib_type = sib.get("type") or sib.get("ltype") or "group"
-            sib_id = sib.get("id")
-            # 给 sibling 也带上 dom_context——避免 sibling 在被父调用之前先被
-            # 缓存为"无 Layer 2"的结果（cache key 不含 dom_context，首次写入即定）。
-            sib_dom = self._build_dom_context(sib, parent)
-            sib_sem = self._resolver.resolve_token(
-                sib.get("name", "") or "", sib_type,
-                layer_id=sib_id, dom_context=sib_dom,
-            ) or _LTYPE_FALLBACK.get(sib_type, "node")
-            if sib_sem != semantic:
-                continue
-            order += 1
-            if sib is layer or sib.get("id") == layer_id:
-                if layer_id is not None:
-                    bucket[layer_id] = order
-                return order
+        # 有 siblings：按 siblings 中出现顺序、相同 semantic 的顺位决定。
+        # 一次性建表后查表，避免每个 layer 都重扫全部兄弟（O(兄弟数²)）。
+        by_obj, by_id = self._sibling_order_map(parent, siblings).get(
+            semantic, ({}, {})
+        )
+        # 先按 layer_id 查（等价于"列表中最早出现的同 id 兄弟"），再按对象身份查。
+        order = by_id.get(layer_id) if layer_id is not None else None
+        if order is None:
+            order = by_obj.get(id(layer))
+        if order is not None:
+            if layer_id is not None:
+                bucket[layer_id] = order
+            return order
 
         # layer 不在 siblings 中（理论不该发生）→ 追加到末尾
         index = len(bucket) + 1
         if layer_id is not None:
             bucket[layer_id] = index
         return index
+
+    def _sibling_order_map(
+        self,
+        parent: Optional[dict[str, Any]],
+        siblings: list[dict[str, Any]],
+    ) -> dict[str, tuple[dict[int, int], dict[Any, int]]]:
+        """为一份 siblings 列表建立"同 semantic 顺位"索引。
+
+        返回 ``{semantic: (id(sibling) → 序号, layer_id → 序号)}``。
+        同一 parent 下重复调用直接命中，避免每层都重扫兄弟列表。
+        """
+        cache_key = (id(parent) if parent is not None else 0, id(siblings))
+        cached = self._sibling_order_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        table: dict[str, tuple[dict[int, int], dict[Any, int]]] = {}
+        for sib in siblings:
+            # 给 sibling 也带上 dom_context——避免 sibling 在被父调用之前先被
+            # 缓存为"无 Layer 2"的结果（cache key 不含 dom_context，首次写入即定）。
+            sib_sem = self._semantic_of(sib, parent)
+            by_obj, by_id = table.setdefault(sib_sem, ({}, {}))
+            order = len(by_obj) + 1
+            by_obj[id(sib)] = order
+            sib_id = sib.get("id")
+            if sib_id is not None and sib_id not in by_id:
+                by_id[sib_id] = order
+
+        self._sibling_order_cache[cache_key] = table
+        self._sibling_order_refs[cache_key] = (parent, siblings)
+        return table
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -299,6 +374,10 @@ class SimpleNamer:
         """重置命名器状态（每次转换开始前调用）。"""
         self._cache.clear()
         self._sibling_seq.clear()
+        self._semantic_cache.clear()
+        self._semantic_cache_refs.clear()
+        self._sibling_order_cache.clear()
+        self._sibling_order_refs.clear()
         self._resolver.reset()
 
     def pop_block(self) -> None:

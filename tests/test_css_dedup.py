@@ -7,13 +7,10 @@
   - Pass 2：等价规则合并
 """
 
-import pytest
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.css_dedup import (
     CssDedup,
-    _CSS_DEFAULT_VALUES,
-    _BACKGROUND_NOISE_VALUES,
 )
 
 

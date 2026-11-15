@@ -5,12 +5,12 @@
 
 使用示例：
     dom_restr = DOMRestructure(soup, css_rules, stats, images_dir)
-    
+
     # 通过 Handler 调用方法
     bg_leaves, fg_leaves = dom_restr.background.extract_leaves(leaves)
-    decor_leaves, remaining = dom_restr.tall_decor.extract_leaves(leaves)
-    tree = dom_restr.clustering.cluster_and_build(leaves)
-    dom_restr.rendering.apply_flex_to_container(group, tree)
+    decor_leaves, remaining = dom_restr.tall_decor.extract_tall_decor_leaves(leaves)
+    tree = dom_restr.clustering.cluster(leaves)
+    dom_restr.rendering.apply_flex_to_existing_container(group, tree)
 """
 
 from .base import DOMHandler

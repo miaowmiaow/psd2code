@@ -72,7 +72,6 @@ class TypedIRCache:
         采用深度优先遍历 (DFS)，同时记录节点深度便于后续增量追踪。
         """
         self._all_nodes_list = []
-        depth_stack = [(self.doc.root, 0)]
 
         def dfs(node: Node, depth: int) -> None:
             self._node_map[node.id] = node

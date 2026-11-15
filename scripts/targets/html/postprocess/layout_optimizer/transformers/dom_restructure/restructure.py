@@ -1,11 +1,17 @@
 """DOM 重构转换器 - 主类
 
-通过 Mixin 继承组合以下模块的功能：
-- ``BackgroundMixin``: 背景剥离 / 吸收 / 合并
-- ``TallDecorMixin``: 高瘦跨行装饰剥离
-- ``ClusteringMixin``: 空间聚类（行列切分 + 叠图判定）
-- ``RenderingMixin``: DOM 渲染（wrapper / flex margin / stack）
-- ``ReclassifyMixin``: Stack → Col 反向升级 + 容器背景吸收 pass
+通过 **Handler 组合**（而非历史版本的 Mixin 继承）分派职责，各 Handler
+均持有 ``self.owner`` 指回本类，读写共享的 soup / css_rules / stats：
+
+- ``BackgroundHandler``: 背景剥离 / 吸收 / 合并
+- ``TallDecorHandler``: 高瘦跨行装饰剥离
+- ``ClusteringHandler``: 空间聚类（行列切分 + 叠图判定）
+- ``RenderingHandler``: DOM 渲染（wrapper / flex margin / stack）
+- ``ReclassifyHandler``: Stack → Col 反向升级 + 容器背景吸收 pass
+
+> 历史混入模块（``background.py`` / ``clustering.py`` / ``rendering.py`` /
+> ``reclassify.py`` / ``tall_decor.py``）在 2026-11 随死代码清理删除：
+> 重构后它们已无任何 import，仅剩与 handlers/ 漂移的旧副本。
 
 核心思路：
     1. 对每个 group 的直接子元素做空间聚类（行/列切分）
@@ -30,12 +36,10 @@ from .handlers import (
     RenderingHandler,
     ReclassifyHandler,
 )
-# 保留原 Mixin 导入以维持向后兼容
-from .background import BackgroundMixin
-from .tall_decor import TallDecorMixin
-from .clustering import ClusteringMixin
-from .rendering import RenderingMixin
-from .reclassify import ReclassifyMixin
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class DOMRestructure:
@@ -82,7 +86,7 @@ class DOMRestructure:
     # ------------------------------------------------------------------
 
     def restructure_dom(self):
-        print("  📦 步骤0: DOM重构（空间聚类 + Flex-Ready 产出）...")
+        logger.info("  📦 步骤0: DOM重构（空间聚类 + Flex-Ready 产出）...")
 
         all_groups = self._collect_all_groups()
 
@@ -91,7 +95,7 @@ class DOMRestructure:
                 self._restructure_group(group)
             except Exception as exc:  # noqa: BLE001
                 name = group.get('data-name', 'unknown')
-                print(f"    ⚠️  {name} 处理失败: {exc}")
+                logger.warning(f"    ⚠️  {name} 处理失败: {exc}")
                 import traceback
                 traceback.print_exc()
 
@@ -182,7 +186,7 @@ class DOMRestructure:
         container_bbox = self._container_css_bbox(group, fallback=fallback_bbox)
         if self._has_significant_overflow(leaves, container_bbox):
             name = group.get('data-name', 'unknown')
-            print(f"    ⏭ {name}: 子层越界明显，保持 absolute")
+            logger.info(f"    ⏭ {name}: 子层越界明显，保持 absolute")
             return
 
         tree = self._build_tree(leaves)
@@ -195,7 +199,7 @@ class DOMRestructure:
             image_only = all((l.data_type or '') == 'image' for l in leaves)
             if image_only and not self._can_flex_applier_handle(group):
                 name = group.get('data-name', 'unknown')
-                print(f"    ⏭ {name}: 纯图片装饰组，保持 absolute")
+                logger.info(f"    ⏭ {name}: 纯图片装饰组，保持 absolute")
                 return
 
         if tree.kind == 'stack':
@@ -203,9 +207,9 @@ class DOMRestructure:
             if not has_flex_subtree:
                 name = group.get('data-name', 'unknown')
                 if self._can_flex_applier_handle(group):
-                    print(f"    ⏭ {name}: 叠图组判定撤销，转交 FlexApplier")
+                    logger.info(f"    ⏭ {name}: 叠图组判定撤销，转交 FlexApplier")
                     return
-                print(f"    ⊙ {name}: 识别为叠图组 ({len(leaves)} 个图层)，保持 absolute")
+                logger.info(f"    ⊙ {name}: 识别为叠图组 ({len(leaves)} 个图层)，保持 absolute")
                 return
 
             name = group.get('data-name', 'unknown')
@@ -243,7 +247,7 @@ class DOMRestructure:
                     f"（吸收 {len(absorbed_leaves)} 个背景）"
                     if absorbed_leaves else ""
                 )
-                print(f"    ✓ {name}: 背景吸收 → flex {summary}{absorbed_info}")
+                logger.info(f"    ✓ {name}: 背景吸收 → flex {summary}{absorbed_info}")
 
                 for leaf in remaining_leaves:
                     # 删除时检查是否有 CSS 需要清理
@@ -296,7 +300,7 @@ class DOMRestructure:
                 f"（吸收 {len(absorbed_leaves)} 个背景）"
                 if absorbed_leaves else ""
             )
-            print(f"    ✓ {name}: 背景剥离 → {summary}{absorbed_info}")
+            logger.info(f"    ✓ {name}: 背景剥离 → {summary}{absorbed_info}")
 
             remaining_leaves = [
                 l for l in leaves if l not in absorbed_leaves
@@ -343,7 +347,7 @@ class DOMRestructure:
 
         name = group.get('data-name', 'unknown')
         summary = self._summarize_tree(tree)
-        print(f"    ✓ {name}: 聚类为 {summary}")
+        logger.info(f"    ✓ {name}: 聚类为 {summary}")
 
         for leaf in leaves:
             leaf.element.extract()
@@ -514,10 +518,32 @@ class DOMRestructure:
         return self.clustering.cluster(leaves)
 
     def _build_tree_without_bg(self, leaves: List[LeafInfo]) -> LayoutNode:
-        """构建前景 leaves 的布局树（不再递归做背景剥离，也不再做装饰层提取，因为已在上层做过）"""
+        """构建前景 leaves 的布局树。
+
+        背景已在调用方剥离，这里额外做一次**装饰层剥离后再判 stack**：
+        卡片类容器（背景去掉后剩「头像 + 若干文字 + 高瘦装饰」）天然满足
+        ``is_stack_group`` 的「存在包含关系」条件，会被直接判成 stack，
+        从而错失 row/col 的机会。先把跨行高瘦装饰剥掉，再看剩余元素能否
+        聚成行/列；能则返回 ``stack(装饰..., 行/列)``，由调用方按 flex 化处理。
+        """
         if len(leaves) == 1:
             leaf = leaves[0]
             return LayoutNode(kind='leaf', bbox=leaf.bbox, leaf=leaf)
+
+        decor_leaves, remaining = self.tall_decor.extract_tall_decor_leaves(leaves)
+        if decor_leaves and 2 <= len(remaining) < len(leaves):
+            sub_tree = self._build_tree_without_bg(remaining)
+            if sub_tree.kind in ('row', 'col'):
+                logger.info(
+                    f"    ⇢ 装饰剥离后成 {sub_tree.kind}：{self._summarize_tree(sub_tree)}"
+                )
+                children = [self.clustering._leaf_to_node(d) for d in decor_leaves]
+                children.append(sub_tree)
+                return LayoutNode(
+                    kind='stack',
+                    bbox=self._envelope([l.bbox for l in leaves]),
+                    children=children,
+                )
 
         if self.clustering.is_stack_group([l.bbox for l in leaves]):
             return LayoutNode(

@@ -3,7 +3,7 @@
 DOM 渲染：将布局树写回 DOM。
 """
 
-from typing import Dict, Optional
+from typing import Optional
 
 from ..data_types import BBox, LayoutNode
 from .base import DOMHandler

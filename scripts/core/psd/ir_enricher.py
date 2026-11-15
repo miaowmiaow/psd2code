@@ -23,7 +23,6 @@ from typing import Any, Optional
 from core.ir import (
     Node,
     GroupNode,
-    ImageNode,
     TextNode,
     ShapeNode,
     Color,

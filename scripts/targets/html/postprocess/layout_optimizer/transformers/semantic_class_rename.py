@@ -62,6 +62,10 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -194,7 +198,7 @@ class SemanticClassRename:
         merged.update(alias_map)
         self.stats["_class_alias_map"] = merged
 
-        print(
+        logger.info(
             f"   - 语义类去后缀: 重写 {len(alias_map)} 个类名（影响 {elements_changed} 个元素）"
         )
 

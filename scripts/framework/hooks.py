@@ -11,6 +11,10 @@ import time
 from abc import ABC
 from typing import TYPE_CHECKING
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from .context import PipelineContext
     from .stage import Stage
@@ -39,20 +43,20 @@ class LoggingHook(PipelineHook):
 
     def on_pipeline_start(self, ctx: "PipelineContext") -> None:
         if self.verbose:
-            print(f"[pipeline] ▶ start target={ctx.target_name}")
+            logger.info(f"[pipeline] ▶ start target={ctx.target_name}")
 
     def on_pipeline_end(self, ctx: "PipelineContext") -> None:
         if self.verbose:
-            print(f"[pipeline] ■ done")
+            logger.info("[pipeline] ■ done")
 
     def on_stage_start(self, stage: "Stage", ctx: "PipelineContext") -> None:
         self._t0[id(stage)] = time.perf_counter()
         if self.verbose:
-            print(f"[pipeline] ↳ {stage.name}")
+            logger.info(f"[pipeline] ↳ {stage.name}")
 
     def on_stage_end(self, stage: "Stage", ctx: "PipelineContext", elapsed_ms: float) -> None:
         if self.verbose:
-            print(f"[pipeline] ✓ {stage.name} ({elapsed_ms:.1f} ms)")
+            logger.info(f"[pipeline] ✓ {stage.name} ({elapsed_ms:.1f} ms)")
 
     def on_error(self, stage: "Stage", ctx: "PipelineContext", err: BaseException) -> None:
-        print(f"[pipeline] ✗ {stage.name} failed: {err!r}")
+        logger.error(f"[pipeline] ✗ {stage.name} failed: {err!r}")

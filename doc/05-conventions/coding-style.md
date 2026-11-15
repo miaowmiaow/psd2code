@@ -30,11 +30,29 @@
 
 ## 日志 / 打印
 
-- 临时调试用 `print(...)` 可以，但正式代码倾向于：
-  - 进度/统计：走 `ctx.log(msg)`（仅 `verbose=True` 时打印）
-  - 强提示（清理目录、失败回退）：`print(...)` 可以保留
-- **不要** 引入标准 `logging` 模块的全局 logger，除非后续统一 logging 改造。
-  临时方案未定之前，保持现有风格。
+自 2026-11 起统一走标准 `logging`（`scripts/common/log_config.py`）：
+
+```python
+from common.log_config import get_logger
+
+logger = get_logger(__name__)      # → logging.getLogger("psd2code.<module>")
+
+logger.info("进度/统计")            # 正常进度
+logger.warning("某步骤失败，已回退")  # 可恢复失败
+logger.error("管线失败")            # 不可恢复错误
+```
+
+规则：
+
+- **库代码禁止 `print`**（CI 的 ruff 规则里 `F`/`E9` 会盯住明显的野 print；
+  code review 也应拦住）。
+- 日志统一挂在 `psd2code.*` 命名空间下，便于调用方整体调级 / 加过滤器。
+- **只有 CLI 入口**（`psd_to_code.main`）调用 `configure_logging(verbose=...)`：
+  它把 INFO 打到 stdout 且只输出 message —— 命令行观感与历史 `print` 完全一致。
+  作为库被调用时不配置 handler，INFO 自动静默，不污染宿主进程。
+- `ctx.log(msg)` 语义不变（仅 `verbose=True` 时输出），内部已改走 logger。
+- 单测断言日志用 `caplog`（示例见 `tests/test_framework.py`），不要再依赖
+  `capsys` 捕获 stdout。
 
 ## 图像相关
 

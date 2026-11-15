@@ -9,10 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from framework.context import PipelineContext
-from framework.pipeline import Pipeline
 from framework.stage import Stage
 
 
@@ -39,9 +37,9 @@ class TestHtmlPipeline:
             "load_psd",
             "parse_to_ir",
             "html_codegen",
+            "bg_nesting_restructure",
             "prune_pre_optimize",
             "layout_optimize",
-            "background_layer_absorption",
         ]
 
     def test_stage_types(self):
@@ -49,9 +47,9 @@ class TestHtmlPipeline:
             LoadPsdStage,
             ParseToIrStage,
             HtmlCodegenStage,
+            BgNestingRestructureStage,
             PrunePreOptimizeStage,
             LayoutOptimizeStage,
-            BackgroundLayerAbsorptionStage,
         )
         p = self._build()
         stage_types = [type(s) for s in p.stages]
@@ -59,9 +57,18 @@ class TestHtmlPipeline:
             LoadPsdStage,
             ParseToIrStage,
             HtmlCodegenStage,
+            BgNestingRestructureStage,
             PrunePreOptimizeStage,
             LayoutOptimizeStage,
-            BackgroundLayerAbsorptionStage,
+        ]
+
+    def test_prefix_builder_is_shared_entrypoint(self):
+        """build_html_pipeline 必须就是 build_html_prefix_stages 的结果。"""
+        from targets.html.pipeline import build_html_prefix_stages
+
+        p = self._build()
+        assert [s.name for s in p.stages] == [
+            s.name for s in build_html_prefix_stages()
         ]
 
     def test_all_stages_are_stage_subclass(self):
@@ -84,24 +91,29 @@ class TestReactPipeline:
 
     def test_stage_count(self):
         p = self._build()
-        # HTML 6 stages + 2 react stages = 8, but BackgroundLayerAbsorption not in React
-        assert len(p.stages) == 7
+        # HTML 前缀链 6 段 + React 专属 2 段
+        assert len(p.stages) == 8
 
     def test_shares_html_prefix(self):
-        """First 5 stages should match HTML pipeline stages (excluding BackgroundLayerAbsorption)."""
+        """前 6 段必须与 HTML target 完全一致（同一前缀链）。"""
         from targets.html.pipeline import build_html_pipeline
         ctx_html = PipelineContext(psd_path=Path("test.psd"))
         html_p = build_html_pipeline(ctx_html)
         react_p = self._build()
-        # React uses the first 5 HTML stages (excluding BackgroundLayerAbsorption)
-        html_base_names = [s.name for s in html_p.stages[:5]]
-        react_prefix = [s.name for s in react_p.stages[:5]]
-        assert react_prefix == html_base_names
+        html_names = [s.name for s in html_p.stages]
+        react_prefix = [s.name for s in react_p.stages[: len(html_names)]]
+        assert react_prefix == html_names
 
     def test_react_specific_stages(self):
         p = self._build()
-        react_stages = [s.name for s in p.stages[5:]]
-        assert "html_to_react" in react_stages or len(react_stages) == 2
+        assert [s.name for s in p.stages[-2:]] == ["html_to_react", "react_scaffold"]
+
+    def test_html_intermediate_lands_in_html_subdir(self):
+        from targets.html.pipeline import LoadPsdStage
+
+        loader = self._build().stages[0]
+        assert isinstance(loader, LoadPsdStage)
+        assert loader._subdir_name == "html"
 
     def test_all_stages_are_stage_subclass(self):
         p = self._build()
@@ -123,24 +135,29 @@ class TestVuePipeline:
 
     def test_stage_count(self):
         p = self._build()
-        # HTML 6 stages + 2 vue stages = 8, but BackgroundLayerAbsorption not in Vue
-        assert len(p.stages) == 7
+        # HTML 前缀链 6 段 + Vue 专属 2 段
+        assert len(p.stages) == 8
 
     def test_shares_html_prefix(self):
-        """First 5 stages should match HTML pipeline stages (excluding BackgroundLayerAbsorption)."""
+        """前 6 段必须与 HTML target 完全一致（同一前缀链）。"""
         from targets.html.pipeline import build_html_pipeline
         ctx_html = PipelineContext(psd_path=Path("test.psd"))
         html_p = build_html_pipeline(ctx_html)
         vue_p = self._build()
-        # Vue uses the first 5 HTML stages (excluding BackgroundLayerAbsorption)
-        html_base_names = [s.name for s in html_p.stages[:5]]
-        vue_prefix = [s.name for s in vue_p.stages[:5]]
-        assert vue_prefix == html_base_names
+        html_names = [s.name for s in html_p.stages]
+        vue_prefix = [s.name for s in vue_p.stages[: len(html_names)]]
+        assert vue_prefix == html_names
 
     def test_vue_specific_stages(self):
         p = self._build()
-        vue_stages = [s.name for s in p.stages[5:]]
-        assert "html_to_vue" in vue_stages or len(vue_stages) == 2
+        assert [s.name for s in p.stages[-2:]] == ["html_to_vue", "vue_scaffold"]
+
+    def test_html_intermediate_lands_in_html_subdir(self):
+        from targets.html.pipeline import LoadPsdStage
+
+        loader = self._build().stages[0]
+        assert isinstance(loader, LoadPsdStage)
+        assert loader._subdir_name == "html"
 
     def test_all_stages_are_stage_subclass(self):
         p = self._build()
@@ -253,7 +270,7 @@ class TestCrossTargetConsistency:
     """Ensure HTML stages appear identically across all target pipelines."""
 
     def test_html_stages_shared(self):
-        from targets.html.pipeline import build_html_pipeline, LoadPsdStage
+        from targets.html.pipeline import build_html_pipeline
         from targets.react.pipeline import build_react_pipeline
         from targets.vue.pipeline import build_vue_pipeline
 
@@ -262,13 +279,11 @@ class TestCrossTargetConsistency:
         react_p = build_react_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="react"))
         vue_p = build_vue_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="vue"))
 
-        # React/Vue share the first 5 HTML stages (excluding BackgroundLayerAbsorption)
-        html_base_types = [type(s).__name__ for s in html_p.stages[:5]]
-        react_prefix = [type(s).__name__ for s in react_p.stages[:5]]
-        vue_prefix = [type(s).__name__ for s in vue_p.stages[:5]]
-
-        assert react_prefix == html_base_types
-        assert vue_prefix == html_base_types
+        # React / Vue 复用完整 HTML 前缀链（含 BgNesting + Prune + LayoutOptimize）
+        html_types = [type(s).__name__ for s in html_p.stages]
+        n = len(html_types)
+        assert [type(s).__name__ for s in react_p.stages[:n]] == html_types
+        assert [type(s).__name__ for s in vue_p.stages[:n]] == html_types
 
     def test_react_vue_have_extra_stages(self):
         from targets.react.pipeline import build_react_pipeline
@@ -277,5 +292,5 @@ class TestCrossTargetConsistency:
         react_p = build_react_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="react"))
         vue_p = build_vue_pipeline(PipelineContext(psd_path=Path("t.psd"), target_name="vue"))
 
-        assert len(react_p.stages) > 5
-        assert len(vue_p.stages) > 5
+        assert len(react_p.stages) == 8
+        assert len(vue_p.stages) == 8

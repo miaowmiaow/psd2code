@@ -7,8 +7,7 @@
 - ReclassifyHandler: Stack → Col 反向升级
 """
 
-from unittest.mock import MagicMock, patch, PropertyMock
-from pathlib import Path
+from unittest.mock import MagicMock
 
 from bs4 import BeautifulSoup
 import pytest
@@ -22,10 +21,6 @@ from targets.html.postprocess.layout_optimizer.transformers.dom_restructure impo
 )
 from targets.html.postprocess.layout_optimizer.transformers.dom_restructure.handlers import (
     TallDecorHandler,
-    ClusteringHandler,
-    RenderingHandler,
-    ReclassifyHandler,
-    BackgroundHandler,
 )
 
 
@@ -511,7 +506,7 @@ class TestHandlerPerformance:
 
         import time
         start = time.time()
-        result = dr.clustering.is_stack_group(bboxes)
+        dr.clustering.is_stack_group(bboxes)
         elapsed = time.time() - start
 
         assert elapsed < 0.1  # 应该在 100ms 内完成
@@ -529,8 +524,8 @@ class TestEdgeCases:
         dr = _make_dom_restructure()
         # 应该不崩溃
         try:
-            tree = dr._build_tree([])
-        except:
+            dr._build_tree([])
+        except Exception:  # noqa: BLE001 - 空输入是否抛错不属于本用例约束
             pass  # 预期可能失败，但不应该崩溃
 
     def test_single_leaf(self):

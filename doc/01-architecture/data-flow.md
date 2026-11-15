@@ -8,6 +8,18 @@
 
 ## 全景图
 
+> **Stage 编号说明**：下图按"职责段"画，编号 1-4 是 HTML 产物阶段的历史编号，
+> 与 `Pipeline.stages` 的实际序号**不完全对应**。真实的 Stage 链为（三端共用，
+> 见 `targets/html/pipeline.py: build_html_prefix_stages`）：
+>
+> ```text
+> 1 LoadPsd → 2 ParseToIr → 3 HtmlCodegen → 4 BgNestingRestructure
+>            → 5 PrunePreOptimize → 6 LayoutOptimize（内含 Step 2.9 背景层吸收）
+> ```
+>
+> `--target react` / `vue` 在此之上再追加 `HtmlToReact/HtmlToVue` + `Scaffold`
+> 两段（中间 HTML 产物落 `<psd>/html/`）。
+
 ```
 ┌─────────────┐
 │  .psd file  │
@@ -74,6 +86,8 @@
 │                                    含 v-stack/v-list position 保护  │
 │                                    + flex-shrink:0 硬约束            │
 │   Step 3    WrapperCollapse        单子 row/col wrapper 折叠          │
+│   Step 2.9  背景层吸收             大底图 leaf → 容器 background-image│
+│                                    （必须早于 CssDedup，依赖 z-index） │
 │   Step 3.3  PositionNoiseRelaxer   位置噪声宽容合并（唯一视觉差异步） │
 │   Step 3.5  CssDedup               默认值剥离 + background shorthand  │
 │                                    + z-index 精简 + 等价规则合并      │

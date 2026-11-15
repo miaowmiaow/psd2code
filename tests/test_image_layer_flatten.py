@@ -17,8 +17,7 @@
 - run() 短路路径（disabled / no images_dir / no canvas）
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 from pathlib import Path
 from bs4 import BeautifulSoup
 
@@ -28,7 +27,6 @@ from targets.html.postprocess.layout_optimizer.transformers.image_layer_flatten 
     _ImageChild,
     _ContainerBg,
     _PARENT_BLOCKING_PROPS,
-    _PARENT_BLOCKING_OVERFLOW_VALUES,
     _URL_RE,
 )
 
@@ -652,7 +650,7 @@ class TestRunShortCircuit:
 
     def test_no_canvas_in_css(self):
         """images_dir 存在但 CSS 中无 #canvas → 跳过"""
-        import tempfile, os
+        import tempfile
         with tempfile.TemporaryDirectory() as td:
             inst = _make_flatten(
                 config=FlattenConfig(enabled=True),

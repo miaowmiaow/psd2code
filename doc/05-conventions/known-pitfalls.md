@@ -7,9 +7,9 @@
 
 ## 1. 子组必须用 `composite(viewport=...)` 渲染
 
-**位置：** `core/extract/layer_exporter.py` 的 `_render_subgroup`
+**位置：** `core/extract/layer_exporter.py` 的 `_render_group_with_hybrid_strategy`
 
-**错误做法：** 递归调用 `_render_group_expanded` 手动渲染子组后再裁切。
+**错误做法：** 递归调用 `_render_group_with_hybrid_strategy` 手动渲染子组后再裁切。
 
 **后果：** 圆角矩形等带效果的子组会在底部/边缘多出 ~75px/行 的多余描边。
 原因是手动渲染无法复现 PS 的"组级效果裁切"行为。

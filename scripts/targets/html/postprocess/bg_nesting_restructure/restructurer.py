@@ -8,16 +8,21 @@ from .detector import (
     get_css_style,
     get_element_bbox,
     get_element_z_index,
+    invalidate_parent_bbox_cache,
     is_completely_contained,
     is_contained_or_compatible_local,
     set_css_cache,
     set_css_rules_cache,
+    update_css_rule_cache,
 )
 from .nesting_builder import (
     build_bg_containment_graph,
-    find_containing_bg,
     order_bg_by_hierarchy,
 )
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def restructure_by_bg_nesting(
@@ -47,13 +52,29 @@ def restructure_by_bg_nesting(
     Returns:
         重组后的 HTML 内容
     """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    restructure_by_bg_nesting_in_soup(
+        soup, css_content=css_content, css_rules=css_rules, debug=debug
+    )
+    return str(soup)
+
+
+def restructure_by_bg_nesting_in_soup(
+    soup: BeautifulSoup,
+    css_content: str = "",
+    css_rules: dict[str, dict[str, str]] | None = None,
+    debug: bool = False,
+) -> None:
+    """对已解析的 DOM 执行背景图层嵌套重组（原地修改 soup）。
+
+    与 ``restructure_by_bg_nesting`` 的唯一差别是不做 HTML 解析/序列化，
+    供 pipeline 在多个 Stage 之间复用同一个 BeautifulSoup 文档。
+    """
     # 初始化 CSS 缓存
     if css_rules is not None:
         set_css_rules_cache(css_rules)
-    elif css_content:
+    else:
         set_css_cache(css_content)
-    
-    soup = BeautifulSoup(html_content, 'html.parser')
     
     # 全页面多轮判定：不仅扫描 layer-group，也扫描吸收后可能产生的新容器（如 image 容器）
     max_rounds = 12
@@ -63,7 +84,7 @@ def restructure_by_bg_nesting(
         containers = _collect_candidate_containers(soup)
 
         if debug:
-            print(
+            logger.info(
                 f"📦 第 {round_idx} 轮：扫描 {len(containers)} 个候选容器，开始检查背景图层..."
             )
 
@@ -75,15 +96,13 @@ def restructure_by_bg_nesting(
         total_restructured += round_restructured
 
         if debug:
-            print(f"   ↳ 第 {round_idx} 轮完成，重组 {round_restructured} 个元素")
+            logger.info(f"   ↳ 第 {round_idx} 轮完成，重组 {round_restructured} 个元素")
 
         if round_restructured == 0:
             break
 
     if debug:
-        print(f"✅ 背景图层嵌套重组完成，共处理 {total_restructured} 个元素")
-
-    return str(soup)
+        logger.info(f"✅ 背景图层嵌套重组完成，共处理 {total_restructured} 个元素")
 
 
 def _collect_candidate_containers(soup: BeautifulSoup) -> list[Tag]:
@@ -164,7 +183,8 @@ def _restructure_group(
 
     # 步骤 7：处理普通元素到对应吸收目标的嵌套
     absorption_hosts = [*effective_bg, *image_hosts]
-    non_bg_children = [c for c in children if c not in absorption_hosts]
+    host_ids = {id(h) for h in absorption_hosts}
+    non_bg_children = [c for c in children if id(c) not in host_ids]
 
     restructured_count = 0
     for non_bg_child in non_bg_children:
@@ -188,7 +208,7 @@ def _restructure_group(
             if debug:
                 non_bg_name = non_bg_child.get('data-name', non_bg_child.get('id', 'unknown'))
                 bg_name = target_bg.get('data-name', target_bg.get('id', 'unknown'))
-                print(f"    🔄 移动: {non_bg_name} → {bg_name}")
+                logger.info(f"    🔄 移动: {non_bg_name} → {bg_name}")
 
     return restructured_count
 
@@ -253,8 +273,10 @@ def _is_contained_or_nearly(
     return is_contained_or_compatible_local(elem_bbox, host_bbox)
 
 
-def _restructure_bg_hierarchy(bg_leaves: list[Tag],
-                              bg_hierarchy: dict[Tag, list[Tag]]) -> None:
+def _restructure_bg_hierarchy(
+    bg_leaves: list[Tag],
+    bg_hierarchy: dict[int, list[Tag]],
+) -> None:
     """处理背景图层间的嵌套关系
     
     如果背景图层 A 包含背景图层 B，则将 B 从 group 中移出，添加到 A 中。
@@ -264,7 +286,7 @@ def _restructure_bg_hierarchy(bg_leaves: list[Tag],
         bg_hierarchy: 包含关系图
     """
     for bg in bg_leaves:
-        contained_bgs = bg_hierarchy.get(bg, [])
+        contained_bgs = bg_hierarchy.get(id(bg), [])
         
         for contained_bg in contained_bgs:
             # z-index 防护：仅允许宿主层级 <= 被吸收层级，避免反向层级嵌套
@@ -281,7 +303,7 @@ def _restructure_bg_hierarchy(bg_leaves: list[Tag],
 
             # 检查 contained_bg 是否仍然在原 group 中
             # （可能已经被前面的操作移出了）
-            if contained_bg.parent == bg.parent:
+            if contained_bg.parent is bg.parent:
                 _move_element(contained_bg, bg, css_rules=None, mark_nested=True)
 
 
@@ -322,6 +344,9 @@ def _move_element(
     if mark_nested:
         elem['data-bg-nested'] = 'true'
 
+    # 父容器未显式声明尺寸时，其 bbox 由子元素范围推导；移动节点会改变该范围。
+    invalidate_parent_bbox_cache()
+
 
 def _parse_px(value: str | None) -> int:
     if not value:
@@ -350,6 +375,7 @@ def _update_css_left_top(
     styles = css_rules.setdefault(selector, {})
     styles['left'] = f'{int(left)}px'
     styles['top'] = f'{int(top)}px'
+    update_css_rule_cache(selector, styles)
 
 
 def _extract_classes(elem: Tag) -> list[str]:
@@ -362,8 +388,10 @@ def _extract_classes(elem: Tag) -> list[str]:
     return []
 
 
-def _get_effective_bg_leaves(bg_leaves: list[Tag],
-                             bg_hierarchy: dict[Tag, list[Tag]]) -> list[Tag]:
+def _get_effective_bg_leaves(
+    bg_leaves: list[Tag],
+    bg_hierarchy: dict[int, list[Tag]],
+) -> list[Tag]:
     """获取最终的"有效背景图层"列表
     
     有效背景图层 = 被包含到其他背景图层中的背景除外
@@ -375,10 +403,10 @@ def _get_effective_bg_leaves(bg_leaves: list[Tag],
     Returns:
         有效背景图层列表
     """
-    contained_bgs: set[Tag] = set()
+    contained_bg_ids: set[int] = set()
 
-    for _bg, contained in bg_hierarchy.items():
-        contained_bgs.update(contained)
+    for contained in bg_hierarchy.values():
+        contained_bg_ids.update(id(bg) for bg in contained)
     
-    # 有效背景 = 所有背景 - 被包含的背景
-    return [bg for bg in bg_leaves if bg not in contained_bgs]
+    # 有效背景 = 所有背景 - 被包含的背景；避免 bs4 Tag 的递归哈希/比较。
+    return [bg for bg in bg_leaves if id(bg) not in contained_bg_ids]

@@ -61,10 +61,9 @@ psd2code/
     │   │
     │   ├── render/                      # 像素渲染
     │   │   ├── __init__.py
-    │   │   ├── layer_renderer.py        # GroupRenderer（组级扩展渲染）
+    │   │   ├── adjustments_patch.py     # psd-tools 补丁
     │   │   └── effects/
     │   │       ├── __init__.py
-    │   │       ├── effect_base.py       # 效果渲染器共用基类
     │   │       ├── effects_renderer.py  # 【Facade】render_layer_with_effects()
     │   │       ├── stroke_renderer.py   # 描边
     │   │       ├── shadow_renderer.py   # 投影 / 内阴影
@@ -84,7 +83,7 @@ psd2code/
         ├── html/
         │   ├── __init__.py              # 触发 HtmlTarget 注册
         │   ├── target.py                # HtmlTarget
-        │   ├── pipeline.py              # 4 个 Stage + build_html_pipeline()
+        │   ├── pipeline.py              # 6 段 Stage + build_html_prefix_stages()
         │   │
         │   ├── codegen/                 # IR → HTML/CSS/JS
         │   │   ├── __init__.py
@@ -189,7 +188,7 @@ psd2code/
 
 - `core/render/effects/effects_renderer.py` —— Facade 入口
 - `core/render/effects/<xxx>_renderer.py` —— 具体效果
-- `core/render/layer_renderer.py` —— 组级扩展渲染
+- `core/extract/layer_exporter.py` —— 组级扩展渲染（`_render_group_with_hybrid_strategy`）
 - `core/render/adjustments_patch.py` —— psd-tools 补丁（调整层 + 描边效果修复）
 
 ### 改 HTML 输出

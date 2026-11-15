@@ -121,6 +121,10 @@ LayoutOptimizer.optimize():
             同 base（剥 __N）+ 非位置签名相同的多个类，当 margin 偏差 ≤ 8px 时
             取众数 margin 归一 + 清零 z-index，让 N 个"只差亚像素位置"的选择器
             进入 CssDedup 合并组。牺牲 ≤ 8px 视觉精度换样式复用。
+  Step 2.9  absorb_background_layers_safe()
+            容器内"大底图 + 浮层"的底图 leaf → 容器 background-image
+            ⚠️ 必须在 CssDedup **之前**：用子元素 z-index 判断前后景，而 dedup 会
+            精简掉与 DOM 顺序一致的 z-index（之后 min_z==max_z 直接早退 → 失效）
   Step 3.5  RepeatClassUnifier.run()
             ≥ 3 个等价 hash 类（.prop__68 / .prop__105 / ...）→ 单一 base 类（.prop）
             （已合并的组从 _css_merge_groups 移除，CssPretty 不再渲染）

@@ -8,12 +8,11 @@
 ```
 core/render/
 ├── __init__.py
-├── layer_renderer.py     # GroupRenderer（组级扩展渲染）
+├── adjustments_patch.py    # psd-tools 补丁（调整层 / 描边绘制修复）
 └── effects/
     ├── __init__.py
-    ├── effect_base.py
     ├── effects_renderer.py  # ★ Facade: render_layer_with_effects()
-    ├── stroke_renderer.py
+    ├── stroke_renderer.py   # StrokeRenderer
     ├── shadow_renderer.py   # DropShadowRenderer + InnerShadowRenderer
     ├── glow_renderer.py     # OuterGlowRenderer + InnerGlowRenderer
     └── overlay_renderer.py  # ColorOverlayRenderer + GradientOverlayRenderer
@@ -74,30 +73,26 @@ shape + 无 Stroke effect → composite()（vector path 更准确）
 | `glow_renderer.py`    | OuterGlowRenderer / InnerGlowRenderer | Outer ✓；Inner ✗ |
 | `overlay_renderer.py` | ColorOverlayRenderer / GradientOverlayRenderer | ✗ |
 
-`effect_base.py` 提供通用工具（如 alpha 通道处理、距离场）。
+各渲染器都是**独立类 + 静态方法**（`can_render(effect)` / `render(...)`），
+由 Facade 用 if/elif 链按 PS 绘制顺序分派，没有共同基类，也没有注册表。
+（历史上的 `effect_base.py` 基类从未被采用，已于 2026-11 删除。）
 
 > 详细渲染算法见 [`../03-topics/effects-rendering.md`](../03-topics/effects-rendering.md)
 
-## `GroupRenderer`（组扩展渲染）
+## 组扩展渲染（已迁到 `core/extract/layer_exporter.py`）
 
-位置：`core/render/layer_renderer.py`
+组的"效果溢出"不是一个独立的渲染器类，而是 `LayerExporter` 内部的一组方法：
 
-```python
-class GroupRenderer:
-    def __init__(self, canvas_width, canvas_height): ...
+| 方法 | 位置 | 职责 |
+| ---- | ---- | ---- |
+| `_group_has_overlay_effects` | `layer_exporter.py:1109` | 判断组是否带叠加类效果 |
+| `_calc_group_expand` | `layer_exporter.py:1139` | 计算需要的向外扩展像素 |
+| `_render_group_with_hybrid_strategy` | `layer_exporter.py:1190` | 扩展画布手动渲染 + `composite()` 覆盖的混合策略 |
+| `_merge_group_as_single_image` | `layer_exporter.py:1616` | 无溢出效果的组：直接整体合成 |
 
-    def render_group_expanded(
-        self,
-        group_layer,
-        grp_bbox,                    # 组原始 bbox
-        expand: int,                 # 向外扩展像素
-        depth: int = 0,
-    ) -> Image.Image:
-        """
-        在扩展画布上手动渲染组的所有子图层。
-        用于处理 **效果溢出** 场景（子图层的外描边/投影超出组 bbox）。
-        """
-```
+> 历史上的 `core/render/layer_renderer.py`（`GroupRenderer.render_group_expanded`）
+> 已于 2026-11 删除：它是 P2 迁移期的中间产物，主流程从未调用。当前唯一实现
+> 就是上表这套方法，**不要**再按旧文档去找 `GroupRenderer`。
 
 **使用前提：** 一般不会直接调用它，而是由
 `core/extract/layer_exporter.py` 的 `_merge_group_as_image` 在检测到效果

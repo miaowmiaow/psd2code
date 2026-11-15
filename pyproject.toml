@@ -4,6 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "psd2code"
+# 包自身版本（PyPI 语义）。注意与「产物格式版本」区分：
+# 后者是 scripts/targets/html/codegen/version.py 的 __version__（写入
+# metadata.json / CSS 头注释），两者独立演进。
 version = "0.1.0"
 description = "PSD → HTML / React / Vue compiler. Pixel-perfect, IR-based, with smart Flex inference and semantic class naming."
 readme = "README.md"
@@ -40,7 +43,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Site Management",
 ]
 dependencies = [
-    "psd-tools>=1.9",
+    "psd-tools>=1.17.1",
     "Pillow>=10.0",
     "numpy>=1.24",
     "beautifulsoup4>=4.12",
@@ -55,6 +58,7 @@ dependencies = [
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
+    "ruff>=0.6",
 ]
 
 [project.urls]
@@ -78,5 +82,27 @@ include = ["framework*", "targets*", "core*", "common*", "config*", "semantic*"]
 [tool.setuptools.package-data]
 "common" = ["*.json"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+# 注意：pytest 配置在 pytest.ini（该文件优先级高于 pyproject），
+# 此处不要重复定义 [tool.pytest.ini_options]，否则改动不生效。
+
+# ---------------------------------------------------------------------------
+# Lint（CI 门禁）
+# ---------------------------------------------------------------------------
+# 只启用「真问题」规则集，避免一次性引入上千条风格告警导致门禁长期变红：
+#   E4/E7/E9 = import 位置 / 语句结构 / 语法类错误
+#   F        = pyflakes（未使用导入与变量、未定义名、f-string 占位符等）
+# 风格类规则（行宽、import 排序、命名）暂不开启；如需引入请先整体格式化再开关。
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = [
+    "scripts/psd2code.egg-info",
+    "output",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # 几何 / bbox 代码里 `l`（leaf）是项目内通用约定，比 `box` 更贴切
+    "E741",
+]

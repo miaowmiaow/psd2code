@@ -58,9 +58,12 @@ def _text_style_css(layer: dict[str, Any]) -> str:
         if leading and leading > 0:
             effective_leading = min(leading, single_line_h)
         css += f'    line-height: {_fmt_num(effective_leading)}px;\n'
-    elif leading and leading <= h:
-        # 单行场景：保留 PSD leading（如有）
-        pass
+    else:
+        # 单行也必须写死行高 = bbox 高度：
+        # 浏览器默认 ``normal`` 行盒 ≈ 1.2~1.4 × font-size，常常高于 PSD 的 bbox，
+        # 导致单行文本纵向溢出并压住下方元素（典型：南瓜大作战 .username
+        # bbox h=25、font-size 21.25，normal 行盒 30px → 溢出 5px）。
+        css += f'    line-height: {_fmt_num(h)}px;\n'
 
     if s.get('color'):
         css += f'    color: {s["color"]};\n'
@@ -96,7 +99,13 @@ class TextRenderer(NodeRenderer):
         if layer.get('text_style'):
             css += _text_style_css(layer)
 
-        css += f'}}'
+        # 裁掉"比设计稿多折出来的行"：PSD 的 bbox 是按设计字体度量的固定框，
+        # 浏览器字体更宽/行盒更高时文字会溢出 bbox，进而压住下方兄弟元素
+        # （典型：南瓜大作战 .task-2 设计 2~3 行、浏览器折成 4 行，溢出 57px）。
+        # 裁切比"溢出覆盖其它元素"更接近设计稿的视觉预期。
+        css += '    overflow: hidden;\n'
+
+        css += '}'
         self.ctx.css_rules.append(css)
 
         html = f'{pad}<div id="{layer_id}" class="{class_name}" data-name="{_esc(layer["name"])}" data-type="text">\n'

@@ -1,6 +1,12 @@
 # 性能优化指南
 
 > **状态**：✅ **第1-5周完成** | **性能提升**：71-73% | **测试**：1260/1260 通过
+>
+> ⚠️ **本文是历史施工记录（2026 上半年）**，文中提到的下列模块**已被删除**
+> （未接入主流程的死代码，2026-11 清理）：`core/pipeline_parallel.py`、
+> `core/ir/delta_ir.py`、`core/ir/streaming_iterator.py`。
+> 现存的有效优化项以 `scripts/` 实际代码为准；当前测试规模请以 CI 为准
+> （本文中的 "1260 个测试" 是当时的数字）。
 
 ---
 
@@ -133,7 +139,8 @@ scripts/core/extract/async_writer.py      # 异步写入管理
 ```python
 scripts/core/psd/ir_enricher.py           # IR 字段补全
 scripts/core/ir/typed_ir_cache.py         # 类型化 IR 缓存（17 个测试）
-scripts/core/ir/delta_ir.py               # 增量 IR 追踪（13 个测试）
+
+# 注：delta_ir.py（增量 IR 追踪）已删除——从未被主流程消费
 ```
 
 **核心 API**：
@@ -162,16 +169,10 @@ class TypedIRCache:
 
 **新增模块**：
 ```python
-scripts/core/pipeline_parallel.py                 # 并行管线（13 个测试）
-  ├─ StageDepGraph: 自动依赖分析
-  ├─ ThreadSafeContext: 线程安全上下文
-  └─ ParallelPipeline: 按依赖分组执行
-
-scripts/core/ir/streaming_iterator.py            # 流式迭代器（5 个测试）
-  ├─ IRBuffer: 节点缓冲区
-  ├─ StreamingIRIterator: DFS 流式迭代
-  ├─ StreamingBatchIterator: 批处理
-  └─ StreamingDepthIterator: 分层迭代
+# 注（2026-11）：下列实验模块未接入主流程，已随死代码清理一并删除：
+#   scripts/core/pipeline_parallel.py     # 并行管线（StageDepGraph / ThreadSafeContext）
+#   scripts/core/ir/streaming_iterator.py # 流式迭代器
+# 删除原因见 framework.md「关于并行管线（已移除）」
 ```
 
 **核心 API**：
@@ -235,12 +236,12 @@ scripts/core/psd/
 └── ir_enricher.py                (Day 16-17, IR 字段补全)
 
 scripts/core/ir/
-├── typed_ir_cache.py             (Day 18, 类型化缓存)
-├── delta_ir.py                   (Day 19-20, 增量追踪)
-└── streaming_iterator.py         (Day 23-24, 流式迭代)
+└── typed_ir_cache.py             (Day 18, 类型化缓存)
 
-scripts/core/
-└── pipeline_parallel.py          (Day 21-22, 并行管线)
+# 已删除（2026-11，未接入主流程）：
+#   scripts/core/ir/delta_ir.py            (Day 19-20, 增量追踪)
+#   scripts/core/ir/streaming_iterator.py  (Day 23-24, 流式迭代)
+#   scripts/core/pipeline_parallel.py      (Day 21-22, 并行管线)
 ```
 
 **测试**：
@@ -248,12 +249,9 @@ scripts/core/
 tests/
 ├── test_unified_light_cache.py              (8 个, 第1周)
 ├── core/
-│   ├── test_pipeline_parallel.py            (13 个, 第5周)
 │   └── ir/
-│       ├── test_typed_ir_cache.py           (17 个, 第4周)
-│       ├── test_delta_ir.py                 (13 个, 第4周)
-│       └── test_streaming_simple.py         (5 个, 第5周)
-└── ... (共 1260/1260 通过 ✓)
+│       └── test_typed_ir_cache.py           (17 个, 第4周)
+└── ... (当时共 1260/1260 通过 ✓)
 ```
 
 ---

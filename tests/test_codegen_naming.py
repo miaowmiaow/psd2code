@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for targets/html/codegen/naming.py — SimpleNamer & _id_suffix."""
 
-import pytest
 
 from targets.html.codegen.naming import SimpleNamer, _id_suffix
 
@@ -143,7 +142,7 @@ class TestSimpleNamerCache:
 
     def test_reset_clears_cache(self):
         layer = {"id": "layer-1", "name": "btn", "type": "image"}
-        cls1 = self.namer.generate_class_name(layer)
+        self.namer.generate_class_name(layer)
         self.namer.reset()
         cls2 = self.namer.generate_class_name(layer)
         # After reset, should still produce a valid class

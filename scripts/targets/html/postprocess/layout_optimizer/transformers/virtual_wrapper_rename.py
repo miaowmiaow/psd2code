@@ -53,6 +53,10 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -269,7 +273,7 @@ class VirtualWrapperRename:
         )
         if classes_collapsed:
             msg += f"，等价合流 {classes_collapsed} 个类"
-        print(msg)
+        logger.info(msg)
 
     # ------------------------------------------------------------------
     # 语义前缀提取

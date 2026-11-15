@@ -1,5 +1,10 @@
 # Phase 3 光效模块修复完成
 
+> ⚠️ **历史归档**：本文记录的 `USE_NEW_MODULES` 开关与
+> `tests/test_phase3_switchover.py` 已在 P3 收尾后移除（新模块成为
+> 唯一路径，测试随之删除）。阅读时请以当前 `scripts/` 代码为准。
+
+
 **日期**: 2026-07-02  
 **状态**: ✅ 完成  
 **验证**: Baseline diff 通过 + 26 个测试通过

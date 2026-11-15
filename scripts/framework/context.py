@@ -13,6 +13,10 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from .hooks import NullHook, PipelineHook
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:  # avoid hard dep at import time
     from psd_tools import PSDImage  # type: ignore
     from scripts.core.ir.document import Document
@@ -46,7 +50,7 @@ class PipelineContext:
     # ---- helpers ----
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[psd2code] {msg}")
+            logger.info(f"[psd2code] {msg}")
 
     def set(self, key: str, value: Any) -> None:
         self.artifacts[key] = value

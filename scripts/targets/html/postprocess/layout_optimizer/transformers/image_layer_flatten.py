@@ -55,9 +55,13 @@ DOM/CSS 替换
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -202,11 +206,11 @@ class ImageLayerFlatten:
         if not images_dir.is_dir():
             return
 
-        print("\n📦 步骤1.2：图层扁平化（统一通道）...")
+        logger.info("\n📦 步骤1.2：图层扁平化（统一通道）...")
 
         canvas_area = self._read_canvas_area()
         if canvas_area is None or canvas_area <= 0:
-            print("   ⚠️  未读到 #canvas 尺寸，跳过")
+            logger.warning("   ⚠️  未读到 #canvas 尺寸，跳过")
             return
 
         # **后序遍历**：先尝试扁平化最深的容器，再向上尝试。
@@ -225,7 +229,7 @@ class ImageLayerFlatten:
                     result = self._try_flatten_container(container, canvas_area)
                 except Exception as exc:  # noqa: BLE001
                     name = container.get('data-name', 'unknown')
-                    print(f"   ⚠️  {name} 扁平化失败: {exc}")
+                    logger.warning(f"   ⚠️  {name} 扁平化失败: {exc}")
                     import traceback
                     traceback.print_exc()
                     continue
@@ -243,7 +247,7 @@ class ImageLayerFlatten:
         self.stats['image_layer_bytes_saved'] += bytes_saved
 
         if flattened_count > 0:
-            print(
+            logger.info(
                 f"   ✓ 扁平化 {flattened_count} 个容器（共合并 {layers_collapsed} 层，"
                 f"节省 {bytes_saved / 1024:.1f} KB）"
             )

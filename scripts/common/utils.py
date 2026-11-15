@@ -31,7 +31,6 @@ import re
 from typing import Optional
 
 from common.semantic import extract_semantic_token  # noqa: F401  (re-export, 兼容旧调用方)
-from semantic import NameResolver
 from semantic.name_resolver import get_default_resolver, reset_default_resolver
 
 

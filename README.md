@@ -93,6 +93,7 @@ python3 .codebuddy/skills/psd2code/psd_to_code.py /path/to/file.psd --target vue
 | `--target {html,react,vue}` | `html` | 选择产物形态 |
 | `--css-style {compact,expanded}` | `compact` | 优化版 CSS 输出风格：`compact` 接近手写、`expanded` 全展开 + PSD 坐标溯源注释 |
 | `--no-css-pretty` | 关闭 | 关闭 CSS 美化，回到字母序机械渲染（CI 基线对比常用） |
+| `--strict` | 关闭 | 优化器任一 transformer 抛错即失败（默认是容错模式：记进 `_layout_stats.json` 的 `failures` 并跳过）。**CI / 回归基线建议开启** |
 | `--no-smart-merge` | 关闭 | 关闭 LayoutOptimizer 链路的「多 url 背景内联合成」（DOMRestructure 内联 + `background_flatten` 文本兜底）。这两项合图只是把同一容器的多 url 背景合成单图、**不删除任何 DOM 子节点**，副作用小，因此默认开启；加该参数后每条 `background-image: url(a), url(b), ...` 保持原样，便于 1:1 逐层诊断 |
 | `--enable-image-layer-flatten` | 关闭 | 显式启用 LayoutOptimizer Step 1.2 `ImageLayerFlatten`：把容器内 N 个 image 子合成单张 PNG 并**删除所有子 DOM 节点**。**默认关闭**（2026-05-27 起），因为它会把语义独立的栅格化元素（按钮 / 数字框 / 被栅格化的 TypeLayer）和真正的装饰像素一起合并，丧失 DOM 可访问性。仅在确认整组是纯装饰时启用 |
 
@@ -142,7 +143,12 @@ output/<psd_stem>/
 │   ├── main.js                  # 国际化等运行时逻辑
 │   ├── metadata.json            # 图层树元数据
 │   ├── layer_map.json           # 反查表：CSS 类名 → PSD 原图层名
+│   ├── class_alias_map.json     # 优化版新类名 → 原始 hash 类名
 │   ├── _naming_report.md        # 语义命名报告（每个 token 的来源）
+│   ├── _mapping_report.md       # 三向映射：class ↔ image ↔ PSD layer
+│   ├── _image_index.md          # 图片索引（哪张图来自哪些图层）
+│   ├── _layout_stats.json       # 优化器计数 + failures（CI 断言入口）
+│   ├── preview.html/.css/.js    # 离线预览页（自动安装）
 │   └── images/                  # 切图 / 合成图 / 背景图
 ├── react/                       # --target react 时产出
 └── vue/                         # --target vue 时产出
@@ -174,7 +180,7 @@ pypinyin
 
 `psd-tools` 是 Python 生态里最成熟的 PSD 解析库，但**它只实现了最常用的渲染器**，对一些常见场景（shape 填充 + 图层样式、超大发光溢出、引擎字典 transform 等）要么出错、要么丢失。我们的做法是：**能修的源码级修，不能修的绕开走手动栅格化**。
 
-### 3.1 文字 `transform.scale` 修正
+### 4.1 文字 `transform.scale` 修正
 
 PSD 文本图层的 `engine_dict.StyleRun...FontSize` 是**原始字号**，但 PS 实际渲染时会用 `layer.transform = (a, b, c, d, e, f)` 矩阵缩放——其中 `a` 是 X 缩放、`d` 是 Y 缩放。
 
@@ -191,7 +197,7 @@ PSD 图层："消耗99兑换币"
 
 如果忽略 `transform.scale`，浏览器会用 17.5px 渲染，文字直接缩成花生米。另一个易踩的兄弟坑：`ParagraphSheet` 的路径不在 `StyleRun` 下，而是 `engine.ParagraphRun.RunArray[0].ParagraphSheet.Properties` 里的 `Justification`，老代码写错路径会导致**所有文字永远左对齐**。这两处我们在 `core/psd/text_extractor.py` 里重新解析。
 
-### 3.2 浏览器字宽差异：纵向 + 横向双兜底
+### 4.2 浏览器字宽差异：纵向 + 横向双兜底
 
 PSD 设计师常用思源黑体 / 造字工房，浏览器渲染时却用 PingFang / Arial——**相同字号下，浏览器中文会比 PSD 更宽**，导致：
 
@@ -220,7 +226,7 @@ if pure_cjk and char_count <= 12:
 | 主赛区（68px 宽） | 25.5px | **20.9px** | ✓ 单行 |
 | 预测四强（164px 宽） | 46.75px | **38.5px** | ✓ 不再折行 |
 
-### 3.3 Shape + 图层样式描边：psd-tools 的致命 bug
+### 4.3 Shape + 图层样式描边：psd-tools 的致命 bug
 
 一个看似普通的 PSD shape 图层（`#feffd7` 浅黄填充 + 2px 内描边 `#5f8618` 绿色），**用 `psd-tools` 直接 `layer.composite()` 会得到整片纯绿色**——填充色完全丢失。
 
@@ -244,7 +250,7 @@ out[:,:,3:4] = stroke_mask[pad:pad+h, pad:pad+w, :] * opacity
 
 效果：兑奖活动卡片的浅黄背景 + 2px 绿描边正确还原，无需人工补图。
 
-### 3.4 图层样式的两层 enabled 开关
+### 4.4 图层样式的两层 enabled 开关
 
 PS 图层样式面板有两个开关：
 
@@ -264,7 +270,7 @@ def is_effect_active(effect, layer):
 
 全工程 8 处调用点全部切换。这解决了带 fx 残留的昵称文本全部被错误降级为图片的问题。
 
-### 3.5 组级效果溢出：手动渲染 + composite 混合
+### 4.5 组级效果溢出：手动渲染 + composite 混合
 
 PS 图层效果（描边、阴影、发光，共 8 种）在组（Group）级别有个隐蔽特性：**效果会沿组的整体边界裁切**。
 
@@ -286,7 +292,7 @@ PS 图层效果（描边、阴影、发光，共 8 种）在组（Group）级别
 
 > **硬约束**：子组（嵌套组）必须用 `sub_grp.composite(viewport=grp_bbox)` 渲染，不能退回"递归调用 `_render_group_expanded` + 裁切"——历史回归实测会在圆角轮廓位置多出 ~75px/行的错误描边。
 
-### 3.6 总结：PSD 解析的修复清单
+### 4.6 总结：PSD 解析的修复清单
 
 | 问题 | 表现 | 我们的做法 |
 |------|------|-----------|
@@ -400,7 +406,7 @@ images/<semantic-tag>-<md5前6位>.png
 
 ![Flex 重构前后对比](./images/flex-before-after.png)
 
-### 6.1 七步流水线全景
+### 6.1 八步流水线全景
 
 ```mermaid
 flowchart TD
@@ -411,7 +417,8 @@ flowchart TD
     E --> F["Step 2.5：单子 wrapper 折叠<br/>(消除中间层)"]
     F --> G["Step 3：CSS 去冗余<br/>(z-index 精简 + 等价规则合并)"]
     G --> G2["Step 3.5：重复元素抽取<br/>(3+ hash 类 → 单 base 类)"]
-    G2 --> H["Step 4：CSS 美化<br/>(DOM 序 + 属性分段 + 多行)"]
+    G3["Step 2.9：背景层吸收<br/>(大底图 → 容器 background-image)"]
+    G3 --> H["Step 4：CSS 美化<br/>(DOM 序 + 属性分段 + 多行)"]
     H --> I["✅ 优化后 HTML / CSS"]
 
     style A fill:#fadbd8,stroke:#c0392b
@@ -419,7 +426,17 @@ flowchart TD
     style B fill:#fcf3cf,stroke:#b7950b
     style E fill:#fcf3cf,stroke:#b7950b
     style G fill:#fcf3cf,stroke:#b7950b
+    style G3 fill:#fcf3cf,stroke:#b7950b
 ```
+
+> Step 2.9「背景层吸收」原本是独立的 `BackgroundLayerAbsorptionStage`（只有
+> HTML target 挂载），现已收进 LayoutOptimizer 链内部，三端（HTML / React / Vue）
+> 行为一致。
+>
+> **它必须跑在 CssDedup 之前**：该 pass 用子元素 `z-index` 判断前后景，而
+> CssDedup 会精简掉"与 DOM 顺序一致"的 z-index（实测底图 `z=1` / 文字 `z=2`
+> 在 dedup 后两个都被删），此时吸收条件退化成 `min_z == max_z` 直接跳过，
+> 整个 pass 变成死代码。
 
 ### 6.2 聚类算法：怎么"看懂"一堆 absolute 框
 
@@ -692,30 +709,40 @@ def register(name: str):
 每个 target 是 `Target` 子类，实现 `build_pipeline(ctx) -> Pipeline`：
 
 ```python
+# targets/html/pipeline.py —— HTML 产物链，三端共用
+def build_html_prefix_stages(subdir_name=None):
+    return [
+        LoadPsdStage(subdir_name=subdir_name),
+        ParseToIrStage(),
+        HtmlCodegenStage(),
+        BgNestingRestructureStage(),
+        PrunePreOptimizeStage(),
+        LayoutOptimizeStage(),      # 内部：Flex → 背景层吸收(2.9) → CSS 去冗余 → 美化
+    ]
+
 # targets/html/target.py
 @register("html")
 class HtmlTarget(Target):
     def build_pipeline(self, ctx):
-        return Pipeline([
-            LoadPsdStage(),
-            ParseStage(),
-            ExtractAssetsStage(),
-            CodegenStage(),
-            LayoutOptimizeStage(),
-            EmitStage(),
-        ])
+        return Pipeline(build_html_prefix_stages())
 
-# targets/react/target.py
+# targets/react/pipeline.py —— 复用同一条前缀链，再二次转换
 @register("react")
 class ReactTarget(Target):
     def build_pipeline(self, ctx):
         return Pipeline([
-            HtmlTarget().build_pipeline(ctx),   # 先产出 HTML（含优化版）
-            Html2ReactStage(),                  # 再转 JSX + Vite 脚手架
+            *build_html_prefix_stages(subdir_name="html"),  # 中间产物落 html/
+            HtmlToReactStage(),                             # HTML → JSX
+            ReactScaffoldStage(),                           # Vite 脚手架
         ])
 
-# targets/vue/target.py 同理
+# targets/vue/pipeline.py 同理
 ```
+
+> 关键点：前缀链只有**一份**定义。历史上 React / Vue 曾各自维护一份 stage 列表，
+> 结果 HTML 侧新增的优化（背景嵌套重组、背景层吸收）没有同步到 React / Vue，
+> 同一份 PSD 三端产物不一致。改为共享 `build_html_prefix_stages` 后，测试
+> `test_pipeline_stages.py::test_shares_html_prefix` 会守住这条约束。
 
 CLI `--target vue` → `get("vue")` → 实例化 → `target.run(ctx)`。新增 target（比如小程序）只需：
 

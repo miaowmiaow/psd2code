@@ -14,7 +14,7 @@
   （Vite + JSX，在 HTML 产物基础上做二次转换）、`target=vue`
   （Vite + Vue 3 SFC，同样基于 HTML 产物二次加工）。
 - 架构已为 `target=mini-program` 等预留扩展点。
-- 入口：`.codebuddy/skills/psd2code/psd_to_code.py`
+- 入口：`psd_to_code.py`（仓库根目录）
 - SKILL 说明：见 [`../SKILL.md`](../SKILL.md)
 
 ## 文档索引
@@ -77,16 +77,16 @@
 
 ```bash
 # 1. HTML 产物（默认）
-python3 .codebuddy/skills/psd2code/psd_to_code.py path/to/file.psd
+python3 psd_to_code.py path/to/file.psd
 
 # 2. React 产物（Vite 项目，在 HTML 产物之上再加工）
-python3 .codebuddy/skills/psd2code/psd_to_code.py path/to/file.psd --target react
+python3 psd_to_code.py path/to/file.psd --target react
 
 # 3. Vue 产物（Vite + Vue 3 SFC，同样基于 HTML 产物二次加工）
-python3 .codebuddy/skills/psd2code/psd_to_code.py path/to/file.psd --target vue
+python3 psd_to_code.py path/to/file.psd --target vue
 
 # 4. 输出
-# .codebuddy/skills/psd2code/output/<psd_stem>/
+# output/<psd_stem>/
 #     ├── html/                   # HTML 版本（任何 target 都会先产出，作为中间/对照产物）
 #     │   ├── index.html
 #     │   ├── style.css
@@ -131,4 +131,4 @@ npm install && npm run dev    # http://localhost:5173
 - 每次引入新的 Stage / Target / Handler / 硬约束，**同步更新** 对应章节。
 - 用"**本文解决什么 / 不讨论什么**"头注帮助读者快速定位。
 - 代码块统一用三反引号 + 语言标签；文件路径用反引号。
-- 所有示例路径以 `.codebuddy/skills/psd2code/scripts/` 为基准。
+- 所有示例路径以仓库根目录为基准（源码在 `scripts/` 下）。

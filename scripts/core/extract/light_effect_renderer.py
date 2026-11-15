@@ -16,6 +16,10 @@ from typing import Any
 from PIL import Image
 import numpy as np
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 # 光照类 blend mode 集合——这些模式下黑色像素是恒等色（与底色混合后
 # 相当于透明/不贡献），topil() 导出时黑色会"暴露"成假的黑色区块。
 # 只有命中此集合 + 图层原始像素含显著黑色区域，才值得走穿透渲染。
@@ -146,10 +150,10 @@ class LightEffectRenderer:
         if not penetrate_candidates:
             return self._penetrate_map
 
-        print(f"🔦 光效层穿透扫描: {len(candidates)} 个候选, "
+        logger.info(f"🔦 光效层穿透扫描: {len(candidates)} 个候选, "
               f"{len(penetrate_candidates)} 个需要穿透")
         for c in penetrate_candidates:
-            print(f"   💡 {c.layer.name} (blend={str(c.layer.blend_mode)}, "
+            logger.info(f"   💡 {c.layer.name} (blend={str(c.layer.blend_mode)}, "
                   f"bbox={c.bbox})")
 
         # ── Phase 3: 向外匹配 → 构建 penetrate_map ──
@@ -157,7 +161,7 @@ class LightEffectRenderer:
             self._find_penetrate_targets(info)
 
         if self._penetrate_map:
-            print(f"   📋 穿透映射: {len(self._penetrate_map)} 个目标图层"
+            logger.info(f"   📋 穿透映射: {len(self._penetrate_map)} 个目标图层"
                   f"需叠加光效")
 
         # ── Phase 5: 构建抑制集合 ──
@@ -170,7 +174,7 @@ class LightEffectRenderer:
             self._suppressed_light_layers.add(li_id)
 
         if self._suppressed_light_layers:
-            print(f"   🚫 抑制独立导出: {len(self._suppressed_light_layers)} "
+            logger.info(f"   🚫 抑制独立导出: {len(self._suppressed_light_layers)} "
                   f"个光效层（已合成到目标层）")
 
         # ── Phase 5 补充：标记降级为 CSS blend 的光效层 ──
@@ -179,7 +183,7 @@ class LightEffectRenderer:
             if id(info.layer) not in effectively_mapped:
                 info.fallback_css_blend = True
                 self._fallback_light_layers.add(id(info.layer))
-                print(f"   🔄 {info.layer.name} → 降级为 CSS blend "
+                logger.info(f"   🔄 {info.layer.name} → 降级为 CSS blend "
                       f"(所有穿透目标无效)")
 
         # 释放 Phase 3 临时图像缓存（可能占用大量内存）
@@ -332,7 +336,7 @@ class LightEffectRenderer:
             if not self._is_effective_light_target(sib, sib_bbox, inter, info):
                 sib_name = getattr(sib, 'name', '?')
                 light_name = getattr(info.layer, 'name', '?')
-                print(f"   ⚡ 跳过无效目标 '{sib_name}' "
+                logger.info(f"   ⚡ 跳过无效目标 '{sib_name}' "
                       f"(亮度过高, 光效 '{light_name}' 合成无效)")
                 continue
 

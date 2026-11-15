@@ -8,6 +8,10 @@
 from typing import Any
 import numpy as np
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class StrokeRenderer:
     """描边效果渲染器"""
@@ -80,7 +84,7 @@ class StrokeRenderer:
             return out
             
         except Exception as e:
-            print(f"      ⚠️  描边渲染失败: {e}")
+            logger.warning(f"      ⚠️  描边渲染失败: {e}")
             return None
     
     @staticmethod

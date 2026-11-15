@@ -4,28 +4,35 @@
 真实 DOM，调用 restructure_dom() 完成完整流程，验证：
 
   - restructure_dom() 对不同布局形态的 group 产出正确的 flex DOM
-  - _extract_background_leaves / _extract_tall_decor_leaves 完整路径
-  - _build_tree → _cluster → _cluster_row 决策链
-  - _is_fake_multirow_stack 回退 stack
-  - _apply_flex_child_margins 正确写入 margin
-  - _render_tree / _render_stack / _render_flex 产出正确 DOM
-  - _bg_passes_safety_filter / _is_absorbable_bg_leaf 条件分支
+  - background.extract_leaves / tall_decor.extract_tall_decor_leaves 完整路径
+  - _build_tree → clustering.cluster → cluster_row 决策链
+  - clustering._is_fake_multirow_stack 回退 stack
+  - rendering.apply_flex_child_margins 正确写入 margin
+  - rendering.render_tree / _render_stack / _render_flex 产出正确 DOM
+  - BackgroundHandler.passes_safety_filter / is_absorbable_bg_leaf 条件分支
   - _bbox_covers_main_axis / _bbox_dominates_both_axes / _bbox_contains_all
   - _are_x_aligned
-  - _absorb_container_backgrounds_pass → _try_reclassify_stack_to_col
-  - _apply_flex_to_existing_container / _apply_stack_to_existing_container
+  - reclassify.absorb_container_backgrounds_pass → _try_reclassify_stack_to_col
+  - apply_flex_to_existing_container / apply_stack_to_existing_container
   - _parse_position_px / _parse_size_px 静态方法
+
+说明：DOMRestructure 已从「Mixin 多继承」重构为「Handler 组合」，聚类 / 背景 /
+渲染逻辑分别挂在 ``dr.clustering`` / ``dr.background`` / ``dr.rendering`` /
+``dr.tall_decor`` / ``dr.reclassify`` 上；纯静态工具方法既可通过 handler 调用，
+也可直接用 handler 类调用（本文件采用后者以保持断言简洁）。
 """
-import pytest
 from bs4 import BeautifulSoup
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from targets.html.postprocess.layout_optimizer.transformers.dom_restructure import (
     BBox,
-    ClusterConfig,
     DOMRestructure,
     LeafInfo,
     LayoutNode,
+)
+from targets.html.postprocess.layout_optimizer.transformers.dom_restructure.handlers import (
+    BackgroundHandler,
+    TallDecorHandler,
 )
 
 
@@ -97,7 +104,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'opacity': '1', 'mix-blend-mode': 'normal'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is True
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is True
 
     def test_not_image(self):
         leaf = LeafInfo(
@@ -105,7 +112,7 @@ class TestBgPassesSafetyFilter:
             data_type='text', bbox=BBox(0, 0, 100, 100),
         )
         styles = {}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is False
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is False
 
     def test_blend_mode_multiply(self):
         leaf = LeafInfo(
@@ -113,7 +120,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'mix-blend-mode': 'multiply'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is False
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is False
 
     def test_low_opacity(self):
         leaf = LeafInfo(
@@ -121,7 +128,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'opacity': '0.5'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is False
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is False
 
     def test_missing_opacity_and_blend(self):
         """无 opacity 和 blend 字段 → 默认通过"""
@@ -130,7 +137,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is True
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is True
 
     def test_opacity_edge_099(self):
         """opacity=0.99 刚好通过"""
@@ -139,7 +146,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'opacity': '0.99'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is True
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is True
 
     def test_opacity_edge_098(self):
         """opacity=0.98 不通过"""
@@ -148,7 +155,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'opacity': '0.98'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is False
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is False
 
     def test_invalid_opacity_value(self):
         leaf = LeafInfo(
@@ -156,7 +163,7 @@ class TestBgPassesSafetyFilter:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'opacity': 'abc'}
-        assert DOMRestructure._bg_passes_safety_filter(leaf, styles) is False
+        assert BackgroundHandler.passes_safety_filter(leaf, styles) is False
 
 
 # ===========================================================================
@@ -172,7 +179,7 @@ class TestIsAbsorbableBgLeaf:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'background-image': 'url("images/bg.png")'}
-        assert dr._is_absorbable_bg_leaf(leaf, styles) is True
+        assert dr.background.is_absorbable_bg_leaf(leaf, styles) is True
 
     def test_without_background_image(self):
         soup = _make_soup('<div></div>')
@@ -182,7 +189,7 @@ class TestIsAbsorbableBgLeaf:
             data_type='image', bbox=BBox(0, 0, 100, 100),
         )
         styles = {}
-        assert dr._is_absorbable_bg_leaf(leaf, styles) is False
+        assert dr.background.is_absorbable_bg_leaf(leaf, styles) is False
 
     def test_fails_safety_filter(self):
         soup = _make_soup('<div></div>')
@@ -192,7 +199,7 @@ class TestIsAbsorbableBgLeaf:
             data_type='text', bbox=BBox(0, 0, 100, 100),
         )
         styles = {'background-image': 'url("images/bg.png")'}
-        assert dr._is_absorbable_bg_leaf(leaf, styles) is False
+        assert dr.background.is_absorbable_bg_leaf(leaf, styles) is False
 
 
 # ===========================================================================
@@ -203,23 +210,23 @@ class TestBboxCoversMainAxis:
     def test_covers_width(self):
         bbox = BBox(0, 20, 200, 80)
         envelope = BBox(0, 0, 200, 100)
-        assert DOMRestructure._bbox_covers_main_axis(bbox, envelope, 2.0) is True
+        assert BackgroundHandler._bbox_covers_main_axis(bbox, envelope, 2.0) is True
 
     def test_covers_height(self):
         bbox = BBox(20, 0, 80, 100)
         envelope = BBox(0, 0, 200, 100)
-        assert DOMRestructure._bbox_covers_main_axis(bbox, envelope, 2.0) is True
+        assert BackgroundHandler._bbox_covers_main_axis(bbox, envelope, 2.0) is True
 
     def test_covers_neither(self):
         bbox = BBox(20, 20, 80, 80)
         envelope = BBox(0, 0, 200, 100)
-        assert DOMRestructure._bbox_covers_main_axis(bbox, envelope, 2.0) is False
+        assert BackgroundHandler._bbox_covers_main_axis(bbox, envelope, 2.0) is False
 
     def test_with_tolerance(self):
         """允许 2px 容忍度"""
         bbox = BBox(1, 1, 199, 99)
         envelope = BBox(0, 0, 200, 100)
-        assert DOMRestructure._bbox_covers_main_axis(bbox, envelope, 2.0) is True
+        assert BackgroundHandler._bbox_covers_main_axis(bbox, envelope, 2.0) is True
 
 
 # ===========================================================================
@@ -230,26 +237,26 @@ class TestBboxDominatesBothAxes:
     def test_full_coverage(self):
         bbox = BBox(0, 0, 100, 100)
         envelope = BBox(0, 0, 100, 100)
-        assert DOMRestructure._bbox_dominates_both_axes(bbox, envelope, 0.8) is True
+        assert BackgroundHandler._bbox_dominates_both_axes(bbox, envelope, 0.8) is True
 
     def test_80_percent(self):
         """覆盖 80% → 刚好通过"""
         bbox = BBox(10, 10, 90, 90)
         envelope = BBox(0, 0, 100, 100)
         # cover_w = 80/100=0.8, cover_h = 80/100=0.8
-        assert DOMRestructure._bbox_dominates_both_axes(bbox, envelope, 0.8) is True
+        assert BackgroundHandler._bbox_dominates_both_axes(bbox, envelope, 0.8) is True
 
     def test_below_threshold(self):
         """覆盖不到 80% → 不通过"""
         bbox = BBox(30, 30, 70, 70)
         envelope = BBox(0, 0, 100, 100)
         # cover_w = 40/100=0.4, cover_h = 40/100=0.4
-        assert DOMRestructure._bbox_dominates_both_axes(bbox, envelope, 0.8) is False
+        assert BackgroundHandler._bbox_dominates_both_axes(bbox, envelope, 0.8) is False
 
     def test_zero_envelope(self):
         bbox = BBox(0, 0, 100, 100)
         envelope = BBox(50, 50, 50, 50)  # zero-size
-        assert DOMRestructure._bbox_dominates_both_axes(bbox, envelope, 0.8) is False
+        assert BackgroundHandler._bbox_dominates_both_axes(bbox, envelope, 0.8) is False
 
 
 # ===========================================================================
@@ -263,21 +270,21 @@ class TestBboxContainsAll:
             LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(10, 10, 190, 190)),
             LeafInfo(MagicMock(), '.b', 'b', 'image', BBox(20, 20, 180, 180)),
         ]
-        assert DOMRestructure._bbox_contains_all(outer, leaves, 2.0) is True
+        assert BackgroundHandler._bbox_contains_all(outer, leaves, 2.0) is True
 
     def test_not_contains(self):
         outer = BBox(10, 10, 100, 100)
         leaves = [
             LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(0, 0, 50, 50)),  # left < outer.left
         ]
-        assert DOMRestructure._bbox_contains_all(outer, leaves, 2.0) is False
+        assert BackgroundHandler._bbox_contains_all(outer, leaves, 2.0) is False
 
     def test_skips_self(self):
         """outer 自身的 bbox 被跳过（通过 is 比较）"""
         outer = BBox(0, 0, 200, 200)
         leaf_with_same_bbox = LeafInfo(MagicMock(), '.a', 'a', 'image', outer)
         # outer 作为某个 leaf 的 bbox 被跳过
-        assert DOMRestructure._bbox_contains_all(outer, [leaf_with_same_bbox], 2.0) is True
+        assert BackgroundHandler._bbox_contains_all(outer, [leaf_with_same_bbox], 2.0) is True
 
     def test_within_tolerance(self):
         """在容忍度内算通过"""
@@ -286,7 +293,7 @@ class TestBboxContainsAll:
         leaves = [
             LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(-1, -1, 101, 101)),
         ]
-        assert DOMRestructure._bbox_contains_all(outer, leaves, 2.0) is True
+        assert BackgroundHandler._bbox_contains_all(outer, leaves, 2.0) is True
 
     def test_outside_tolerance(self):
         """超出容忍度 → 不通过"""
@@ -294,7 +301,7 @@ class TestBboxContainsAll:
         leaves = [
             LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(-5, -5, 105, 105)),
         ]
-        assert DOMRestructure._bbox_contains_all(outer, leaves, 2.0) is False
+        assert BackgroundHandler._bbox_contains_all(outer, leaves, 2.0) is False
 
 
 # ===========================================================================
@@ -308,21 +315,21 @@ class TestAreXAligned:
             LeafInfo(MagicMock(), '.b', 'b', 'text', BBox(10, 25, 180, 45)),
             LeafInfo(MagicMock(), '.c', 'c', 'text', BBox(10, 50, 190, 70)),
         ]
-        assert DOMRestructure._are_x_aligned(leaves, 0.2) is True
+        assert TallDecorHandler._are_x_aligned(leaves, 0.2) is True
 
     def test_not_aligned(self):
         leaves = [
             LeafInfo(MagicMock(), '.a', 'a', 'text', BBox(10, 0, 200, 20)),
             LeafInfo(MagicMock(), '.b', 'b', 'text', BBox(300, 25, 400, 45)),
         ]
-        assert DOMRestructure._are_x_aligned(leaves, 0.2) is False
+        assert TallDecorHandler._are_x_aligned(leaves, 0.2) is False
 
     def test_single_element(self):
         leaves = [LeafInfo(MagicMock(), '.a', 'a', 'text', BBox(10, 0, 200, 20))]
-        assert DOMRestructure._are_x_aligned(leaves, 0.2) is True
+        assert TallDecorHandler._are_x_aligned(leaves, 0.2) is True
 
     def test_empty(self):
-        assert DOMRestructure._are_x_aligned([], 0.2) is True
+        assert TallDecorHandler._are_x_aligned([], 0.2) is True
 
 
 # ===========================================================================
@@ -338,7 +345,7 @@ class TestIsFakeMultirowStack:
             [LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(0, 0, 100, 50))],
             [LeafInfo(MagicMock(), '.b', 'b', 'image', BBox(0, 60, 100, 110))],
         ]
-        assert dr._is_fake_multirow_stack(rows) is True
+        assert dr.clustering._is_fake_multirow_stack(rows) is True
 
     def test_too_many_rows(self):
         """≥ 4 行（默认 fake_multirow_max_rows=4） → 不回退"""
@@ -349,7 +356,7 @@ class TestIsFakeMultirowStack:
                       BBox(0, i * 60, 100, i * 60 + 50))]
             for i in range(4)
         ]
-        assert dr._is_fake_multirow_stack(rows) is False
+        assert dr.clustering._is_fake_multirow_stack(rows) is False
 
     def test_multi_elem_row(self):
         """某行有多个元素 → 不回退（真正的网格行）"""
@@ -362,7 +369,7 @@ class TestIsFakeMultirowStack:
             ],
             [LeafInfo(MagicMock(), '.c', 'c', 'image', BBox(0, 60, 100, 110))],
         ]
-        assert dr._is_fake_multirow_stack(rows) is False
+        assert dr.clustering._is_fake_multirow_stack(rows) is False
 
     def test_x_not_aligned(self):
         """2 行各 1 元素但 X 不对齐 → 不回退"""
@@ -372,7 +379,7 @@ class TestIsFakeMultirowStack:
             [LeafInfo(MagicMock(), '.a', 'a', 'image', BBox(0, 0, 50, 50))],
             [LeafInfo(MagicMock(), '.b', 'b', 'image', BBox(200, 60, 400, 110))],
         ]
-        assert dr._is_fake_multirow_stack(rows) is False
+        assert dr.clustering._is_fake_multirow_stack(rows) is False
 
 
 # ===========================================================================
@@ -397,7 +404,7 @@ class TestExtractTallDecorLeaves:
         icon = LeafInfo(MagicMock(), '.icon', 'icon', 'image',
                         BBox(5, 5, 45, 89))  # width=40, height=84
         leaves = texts + [icon]
-        decor, fg = dr._extract_tall_decor_leaves(leaves)
+        decor, fg = dr.tall_decor.extract_tall_decor_leaves(leaves)
         assert len(decor) == 1
         assert decor[0].name == 'icon'
         assert len(fg) == 3
@@ -414,7 +421,7 @@ class TestExtractTallDecorLeaves:
         icon = LeafInfo(MagicMock(), '.icon', 'icon', 'image',
                         BBox(5, 5, 45, 35))  # height=30
         leaves = texts + [icon]
-        decor, fg = dr._extract_tall_decor_leaves(leaves)
+        decor, fg = dr.tall_decor.extract_tall_decor_leaves(leaves)
         assert len(decor) == 0
         assert len(fg) == 4
 
@@ -429,7 +436,7 @@ class TestExtractTallDecorLeaves:
         ]
         icon = LeafInfo(MagicMock(), '.icon', 'icon', 'image',
                         BBox(5, 5, 45, 89))
-        decor, fg = dr._extract_tall_decor_leaves(texts + [icon])
+        decor, fg = dr.tall_decor.extract_tall_decor_leaves(texts + [icon])
         assert len(decor) == 0
 
     def test_crossed_leaves_not_x_aligned(self):
@@ -444,7 +451,7 @@ class TestExtractTallDecorLeaves:
         icon = LeafInfo(MagicMock(), '.icon', 'icon', 'image',
                         BBox(5, 0, 45, 84))  # height=84 >> 20*2
         leaves = texts + [icon]
-        decor, fg = dr._extract_tall_decor_leaves(leaves)
+        decor, fg = dr.tall_decor.extract_tall_decor_leaves(leaves)
         assert len(decor) == 0
 
 
@@ -476,7 +483,7 @@ class TestExtractBackgroundLeaves:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         leaves = dr._collect_leaves(group)
-        bg_leaves, fg_leaves = dr._extract_background_leaves(leaves)
+        bg_leaves, fg_leaves = dr.background.extract_leaves(leaves)
         assert len(bg_leaves) == 1
         assert bg_leaves[0].name == 'bg'
         assert len(fg_leaves) == 1
@@ -503,7 +510,7 @@ class TestExtractBackgroundLeaves:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         leaves = dr._collect_leaves(group)
-        bg_leaves, fg_leaves = dr._extract_background_leaves(leaves)
+        bg_leaves, fg_leaves = dr.background.extract_leaves(leaves)
         assert len(bg_leaves) == 0
         assert len(fg_leaves) == 2
 
@@ -531,7 +538,7 @@ class TestExtractBackgroundLeaves:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         leaves = dr._collect_leaves(group)
-        bg_leaves, fg_leaves = dr._extract_background_leaves(leaves)
+        bg_leaves, fg_leaves = dr.background.extract_leaves(leaves)
         assert len(bg_leaves) == 0
 
 
@@ -620,7 +627,7 @@ class TestApplyFlexChildMargins:
         dr = _make_dr(soup, css)
         parent_bbox = BBox(10, 5, 200, 100)
         child_bbox = BBox(20, 10, 70, 60)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', child_bbox, parent_bbox, prev_bbox=None, flex_kind='row')
         styles = css['.child']
         assert styles.get('margin-left') == '10px'
@@ -636,7 +643,7 @@ class TestApplyFlexChildMargins:
         parent_bbox = BBox(0, 0, 200, 100)
         child_bbox = BBox(110, 5, 160, 55)
         prev_bbox = BBox(0, 0, 100, 50)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', child_bbox, parent_bbox, prev_bbox=prev_bbox, flex_kind='row')
         styles = css['.child']
         assert styles.get('margin-left') == '10px'
@@ -649,7 +656,7 @@ class TestApplyFlexChildMargins:
         dr = _make_dr(soup, css)
         parent_bbox = BBox(5, 10, 100, 200)
         child_bbox = BBox(15, 30, 80, 60)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', child_bbox, parent_bbox, prev_bbox=None, flex_kind='col')
         styles = css['.child']
         assert styles.get('margin-top') == '20px'
@@ -663,7 +670,7 @@ class TestApplyFlexChildMargins:
         parent_bbox = BBox(0, 0, 100, 200)
         child_bbox = BBox(5, 80, 80, 120)
         prev_bbox = BBox(0, 0, 100, 60)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', child_bbox, parent_bbox, prev_bbox=prev_bbox, flex_kind='col')
         styles = css['.child']
         assert styles.get('margin-top') == '20px'
@@ -674,7 +681,7 @@ class TestApplyFlexChildMargins:
         soup = _make_soup('<div></div>')
         css = {'.child': {'position': 'absolute'}}
         dr = _make_dr(soup, css)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', BBox(0, 0, 50, 50), BBox(0, 0, 100, 100),
             prev_bbox=None, flex_kind='row')
         assert css['.child']['flex-shrink'] == '0'
@@ -684,7 +691,7 @@ class TestApplyFlexChildMargins:
         soup = _make_soup('<div></div>')
         css = {'.child': {'position': 'absolute'}}
         dr = _make_dr(soup, css)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', BBox(0, 0, 50, 50), BBox(0, 0, 100, 100),
             prev_bbox=None, flex_kind='row', child_position='relative')
         assert css['.child']['position'] == 'relative'
@@ -694,7 +701,7 @@ class TestApplyFlexChildMargins:
         soup = _make_soup('<div></div>')
         css = {'.child': {'position': 'absolute', 'z-index': '5'}}
         dr = _make_dr(soup, css)
-        dr._apply_flex_child_margins(
+        dr.rendering.apply_flex_child_margins(
             '.child', BBox(0, 0, 50, 50), BBox(0, 0, 100, 100),
             prev_bbox=None, flex_kind='row', child_position='static')
         assert css['.child']['position'] == 'relative'
@@ -712,7 +719,7 @@ class TestApplyFlexToExistingContainer:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         tree = LayoutNode(kind='row', bbox=BBox(0, 0, 300, 200), children=[])
-        dr._apply_flex_to_existing_container(group, tree)
+        dr.rendering.apply_flex_to_existing_container(group, tree)
         assert css['.group-1']['display'] == 'flex'
         assert css['.group-1']['flex-direction'] == 'row'
         assert 'v-row' in group.get('class', [])
@@ -724,7 +731,7 @@ class TestApplyFlexToExistingContainer:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         tree = LayoutNode(kind='col', bbox=BBox(0, 0, 300, 200), children=[])
-        dr._apply_flex_to_existing_container(group, tree)
+        dr.rendering.apply_flex_to_existing_container(group, tree)
         assert css['.group-1']['display'] == 'flex'
         assert css['.group-1']['flex-direction'] == 'column'
         assert 'v-col' in group.get('class', [])
@@ -737,7 +744,7 @@ class TestApplyFlexToExistingContainer:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         tree = LayoutNode(kind='row', bbox=BBox(20, 15, 300, 200), children=[])
-        dr._apply_flex_to_existing_container(group, tree)
+        dr.rendering.apply_flex_to_existing_container(group, tree)
         assert css['.group-1']['padding-left'] == '20px'
         assert css['.group-1']['padding-top'] == '15px'
         assert css['.group-1']['box-sizing'] == 'border-box'
@@ -756,7 +763,7 @@ class TestApplyStackToExistingContainer:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         tree = LayoutNode(kind='stack', bbox=BBox(0, 0, 300, 200), children=[])
-        dr._apply_stack_to_existing_container(group, tree)
+        dr.rendering.apply_stack_to_existing_container(group, tree)
         assert css['.group-1']['position'] == 'relative'
         assert 'v-stack' in group.get('class', [])
 
@@ -768,7 +775,7 @@ class TestApplyStackToExistingContainer:
         dr = _make_dr(soup, css)
         group = soup.find('div', class_='layer-group')
         tree = LayoutNode(kind='stack', bbox=BBox(0, 0, 300, 200), children=[])
-        dr._apply_stack_to_existing_container(group, tree)
+        dr.rendering.apply_stack_to_existing_container(group, tree)
         assert css['.group-1']['position'] == 'absolute'
 
 
@@ -778,42 +785,42 @@ class TestApplyStackToExistingContainer:
 
 class TestParsePositionPx:
     def test_left_top(self):
-        assert DOMRestructure._parse_position_px('left top') == (0, 0)
+        assert BackgroundHandler._parse_position_px('left top') == (0, 0)
 
     def test_zero_zero(self):
-        assert DOMRestructure._parse_position_px('0 0') == (0, 0)
+        assert BackgroundHandler._parse_position_px('0 0') == (0, 0)
 
     def test_px_values(self):
-        assert DOMRestructure._parse_position_px('10px 20px') == (10, 20)
+        assert BackgroundHandler._parse_position_px('10px 20px') == (10, 20)
 
     def test_negative(self):
-        assert DOMRestructure._parse_position_px('-5px -10px') == (-5, -10)
+        assert BackgroundHandler._parse_position_px('-5px -10px') == (-5, -10)
 
     def test_invalid(self):
-        assert DOMRestructure._parse_position_px('center center') is None
+        assert BackgroundHandler._parse_position_px('center center') is None
 
     def test_float_values(self):
-        assert DOMRestructure._parse_position_px('10.6px 20.4px') == (11, 20)
+        assert BackgroundHandler._parse_position_px('10.6px 20.4px') == (11, 20)
 
 
 class TestParseSizePx:
     def test_px_values(self):
-        assert DOMRestructure._parse_size_px('100px 200px') == (100, 200)
+        assert BackgroundHandler._parse_size_px('100px 200px') == (100, 200)
 
     def test_100_percent(self):
-        assert DOMRestructure._parse_size_px('100% 100%') is None
+        assert BackgroundHandler._parse_size_px('100% 100%') is None
 
     def test_auto(self):
-        assert DOMRestructure._parse_size_px('auto') is None
+        assert BackgroundHandler._parse_size_px('auto') is None
 
     def test_cover(self):
-        assert DOMRestructure._parse_size_px('cover') is None
+        assert BackgroundHandler._parse_size_px('cover') is None
 
     def test_float_values(self):
-        assert DOMRestructure._parse_size_px('99.6px 50.4px') == (100, 50)
+        assert BackgroundHandler._parse_size_px('99.6px 50.4px') == (100, 50)
 
     def test_invalid(self):
-        assert DOMRestructure._parse_size_px('50% auto') is None
+        assert BackgroundHandler._parse_size_px('50% auto') is None
 
 
 # ===========================================================================
@@ -894,14 +901,20 @@ class TestRestructureDomEndToEnd:
         assert 'display' not in css['.group-1']
 
     def test_grid_layout_produces_col_of_rows(self):
-        """2行×2列网格 → col 包含 2 个 row"""
+        """2行×2列网格 → col 包含 2 个 row
+
+        注：子层用 data_type='text'。「纯图片装饰组」在新版里被显式保护为
+        absolute（restructure.py:193），因此网格识别用例必须带非图片子层。
+        """
         specs = [
             {'cls': 'a', 'left': 0, 'top': 0, 'width': 80, 'height': 50},
             {'cls': 'b', 'left': 150, 'top': 5, 'width': 80, 'height': 45},
             {'cls': 'c', 'left': 0, 'top': 100, 'width': 80, 'height': 50},
             {'cls': 'd', 'left': 150, 'top': 105, 'width': 80, 'height': 45},
         ]
-        html = _build_group_html([{'cls': s['cls']} for s in specs])
+        html = _build_group_html([
+            {'cls': s['cls'], 'data_type': 'text'} for s in specs
+        ])
         soup = _make_soup(html)
         css = _build_css_for_leaves(specs)
         css['.group-1'] = {
@@ -971,7 +984,7 @@ class TestRenderStack:
             children=[LayoutNode(kind='leaf', bbox=l.bbox, leaf=l) for l in leaves],
         )
         parent_origin = BBox(0, 0, 100, 100)
-        wrapper = dr._render_stack(node, parent_origin)
+        dr.rendering._render_stack(node, parent_origin)
         # 子元素应该都有 position:absolute
         assert css['.a']['position'] == 'absolute'
         assert css['.b']['position'] == 'absolute'
@@ -1007,7 +1020,7 @@ class TestRenderFlex:
             children=[LayoutNode(kind='leaf', bbox=l.bbox, leaf=l) for l in leaves],
         )
         parent_origin = BBox(0, 0, 200, 100)
-        wrapper = dr._render_flex(node, parent_origin)
+        wrapper = dr.rendering._render_flex(node, parent_origin)
         # 第一个子：margin-left=0(不写), margin-top=0(不写)
         assert 'margin-left' not in css['.a'] or css['.a'].get('margin-left') == '0px'
         # 第二个子：margin-left = 100 - 80 = 20
@@ -1059,7 +1072,7 @@ class TestMakeWrapperDiv:
         soup = _make_soup('<div></div>')
         css = {}
         dr = _make_dr(soup, css)
-        wrapper = dr._make_wrapper_div('row')
+        wrapper = dr.rendering._make_wrapper_div('row')
         assert wrapper.name == 'div'
         classes = wrapper.get('class', [])
         assert 'v-row-1' in classes
@@ -1071,8 +1084,8 @@ class TestMakeWrapperDiv:
         soup = _make_soup('<div></div>')
         css = {}
         dr = _make_dr(soup, css)
-        wrapper = dr._make_wrapper_div('row')
-        dr._write_wrapper_css(
+        wrapper = dr.rendering._make_wrapper_div('row')
+        dr.rendering._write_wrapper_css(
             wrapper,
             self_bbox=BBox(10, 20, 210, 120),
             parent_origin=BBox(0, 0, 300, 200),
@@ -1088,8 +1101,8 @@ class TestMakeWrapperDiv:
         soup = _make_soup('<div></div>')
         css = {}
         dr = _make_dr(soup, css)
-        wrapper = dr._make_wrapper_div('stack')
-        dr._write_wrapper_css(
+        wrapper = dr.rendering._make_wrapper_div('stack')
+        dr.rendering._write_wrapper_css(
             wrapper,
             self_bbox=BBox(0, 0, 100, 100),
             parent_origin=BBox(0, 0, 100, 100),
@@ -1111,7 +1124,7 @@ class TestHasBlendModeDescendant:
         css = {'.child': {'color': 'red'}}
         dr = _make_dr(soup, css)
         parent = soup.find('div', class_='parent')
-        assert dr._has_blend_mode_descendant(parent) is False
+        assert dr.background._has_blend_mode_descendant(parent) is False
 
     def test_with_blend(self):
         html = '<div class="parent"><div class="child"></div></div>'
@@ -1119,7 +1132,7 @@ class TestHasBlendModeDescendant:
         css = {'.child': {'mix-blend-mode': 'multiply'}}
         dr = _make_dr(soup, css)
         parent = soup.find('div', class_='parent')
-        assert dr._has_blend_mode_descendant(parent) is True
+        assert dr.background._has_blend_mode_descendant(parent) is True
 
     def test_normal_blend_is_false(self):
         html = '<div class="parent"><div class="child"></div></div>'
@@ -1127,7 +1140,7 @@ class TestHasBlendModeDescendant:
         css = {'.child': {'mix-blend-mode': 'normal'}}
         dr = _make_dr(soup, css)
         parent = soup.find('div', class_='parent')
-        assert dr._has_blend_mode_descendant(parent) is False
+        assert dr.background._has_blend_mode_descendant(parent) is False
 
 
 # ===========================================================================
@@ -1143,9 +1156,9 @@ class TestSiblingIndexInDom:
         leaf_a = LeafInfo(children[0], '.a', 'a', 'image', BBox(0, 0, 10, 10))
         leaf_b = LeafInfo(children[1], '.b', 'b', 'image', BBox(0, 0, 10, 10))
         leaf_c = LeafInfo(children[2], '.c', 'c', 'image', BBox(0, 0, 10, 10))
-        assert DOMRestructure._sibling_index_in_dom(leaf_a) == 0
-        assert DOMRestructure._sibling_index_in_dom(leaf_b) == 1
-        assert DOMRestructure._sibling_index_in_dom(leaf_c) == 2
+        assert BackgroundHandler._sibling_index_in_dom(leaf_a) == 0
+        assert BackgroundHandler._sibling_index_in_dom(leaf_b) == 1
+        assert BackgroundHandler._sibling_index_in_dom(leaf_c) == 2
 
 
 # ===========================================================================
@@ -1199,7 +1212,7 @@ class TestCluster:
             {'cls': 'd', 'left': 100, 'top': 105, 'width': 50, 'height': 25},
         ]
         dr, leaves = self._setup_dr(specs)
-        tree = dr._cluster(leaves)
+        tree = dr.clustering.cluster(leaves)
         assert tree.kind == 'col'
         assert all(c.kind == 'row' for c in tree.children)
 
@@ -1211,7 +1224,7 @@ class TestCluster:
             {'cls': 'c', 'left': 200, 'top': 0, 'width': 50, 'height': 50},
         ]
         dr, leaves = self._setup_dr(specs)
-        tree = dr._cluster(leaves)
+        tree = dr.clustering.cluster(leaves)
         assert tree.kind == 'row'
         assert len(tree.children) == 3
 
@@ -1224,6 +1237,6 @@ class TestCluster:
         dr, leaves = self._setup_dr(specs)
         # 确保 row_dominant_overlap_ratio 让它们切成 2 行
         dr.config.row_dominant_overlap_ratio = 0.5
-        tree = dr._cluster(leaves)
+        tree = dr.clustering.cluster(leaves)
         # 应该回退为 stack（fake multirow：2 行各 1 元素 + X 100% 对齐）
         assert tree.kind == 'stack'

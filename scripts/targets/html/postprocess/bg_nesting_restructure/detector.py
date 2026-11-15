@@ -6,13 +6,69 @@
 3. z-index 在同级中最高
 """
 
-from typing import Any
 from bs4 import Tag
 import re
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # 全局 CSS 缓存，用于解析样式
 _css_cache: dict[str, dict[str, str]] = {}
+
+# ---------------------------------------------------------------------------
+# 几何 / 内联样式解析缓存
+#
+# 背景重组会在同一批元素上反复询问 bbox：``detect_background_leaves`` 里每个
+# 子元素都要 ``get_parent_bbox(parent)``，而后者又要遍历 parent 的全部子元素；
+# 每算一个 bbox 还要把 ``style`` 属性字符串 split 四次。在几百层的 PSD 上这会
+# 退化成数万次重复解析。
+#
+# key 一律用 ``id(elem)``（bs4 Tag 的 ``__hash__`` 是"序列化后取哈希"，既不稳定
+# 又极慢，绝不能拿来当缓存键）；``_memo_refs`` 持强引用，避免元素被回收后
+# ``id`` 被复用导致串味。
+# ---------------------------------------------------------------------------
+_bbox_cache: dict[int, tuple[int, int, int, int]] = {}
+_parent_bbox_cache: dict[int, tuple[int, int, int, int]] = {}
+_inline_style_cache: dict[int, dict[str, str]] = {}
+_memo_refs: dict[int, Tag] = {}
+
+
+def clear_geometry_cache() -> None:
+    """清空几何/样式缓存。
+
+    在 CSS 规则变更（如 ``_move_element`` 写回 left/top）后必须调用，
+    否则会读到旧的坐标。
+    """
+    _bbox_cache.clear()
+    _parent_bbox_cache.clear()
+    _inline_style_cache.clear()
+    _memo_refs.clear()
+
+
+def _inline_style_map(elem: Tag) -> dict[str, str]:
+    """把元素的 ``style`` 属性解析成 dict（按 id 缓存，只解析一次）。"""
+    key = id(elem)
+    cached = _inline_style_cache.get(key)
+    if cached is not None:
+        return cached
+
+    styles: dict[str, str] = {}
+    style = elem.get('style', '')
+    if style:
+        for declaration in style.split(';'):
+            if ':' not in declaration:
+                continue
+            prop, value = declaration.split(':', 1)
+            prop = prop.strip()
+            value = value.strip()
+            if prop and value:
+                styles[prop] = value
+
+    _inline_style_cache[key] = styles
+    _memo_refs[key] = elem
+    return styles
 
 
 def set_css_cache(css_content: str) -> None:
@@ -23,6 +79,7 @@ def set_css_cache(css_content: str) -> None:
     """
     global _css_cache
     _css_cache.clear()
+    clear_geometry_cache()
     
     # 改进的 CSS 解析（支持多行样式）
     # 格式: .classname { property: value; ... }
@@ -51,8 +108,21 @@ def set_css_rules_cache(css_rules: dict[str, dict[str, str]]) -> None:
     """从解析后的 CSS 规则字典初始化缓存。"""
     global _css_cache
     _css_cache.clear()
+    clear_geometry_cache()
     for selector, styles in css_rules.items():
         _css_cache[selector] = dict(styles)
+
+
+def update_css_rule_cache(selector: str, styles: dict[str, str]) -> None:
+    """同步单条被改写的 CSS 规则，并使派生几何缓存失效。"""
+    _css_cache[selector] = dict(styles)
+    _bbox_cache.clear()
+    _parent_bbox_cache.clear()
+
+
+def invalidate_parent_bbox_cache() -> None:
+    """DOM 节点移动后，使依赖子节点范围计算的父 bbox 失效。"""
+    _parent_bbox_cache.clear()
 
 
 def get_css_style(elem: Tag, prop: str) -> str | None:
@@ -65,9 +135,8 @@ def get_css_style(elem: Tag, prop: str) -> str | None:
     Returns:
         属性值，如果找不到则返回 None
     """
-    # 优先从元素的 style 属性读取
-    style = elem.get('style', '')
-    value = _extract_css_property(style, prop)
+    # 优先从元素的 style 属性读取（解析结果按元素缓存，避免反复 split）
+    value = _inline_style_map(elem).get(prop)
     if value:
         return value
     
@@ -89,7 +158,15 @@ def get_css_style(elem: Tag, prop: str) -> str | None:
 
 
 def get_element_bbox(elem: Tag) -> tuple[int, int, int, int]:
-    """获取元素的 bbox (left, top, width, height)"""
+    """获取元素的 bbox (left, top, width, height)
+
+    结果按元素缓存；CSS 变更时由 ``clear_geometry_cache`` 统一失效。
+    """
+    key = id(elem)
+    cached = _bbox_cache.get(key)
+    if cached is not None:
+        return cached
+
     left_str = get_css_style(elem, 'left') or '0px'
     top_str = get_css_style(elem, 'top') or '0px'
     width_str = get_css_style(elem, 'width') or '0px'
@@ -99,8 +176,11 @@ def get_element_bbox(elem: Tag) -> tuple[int, int, int, int]:
     top = int(top_str.replace('px', '').strip()) if top_str else 0
     width = int(width_str.replace('px', '').strip()) if width_str else 0
     height = int(height_str.replace('px', '').strip()) if height_str else 0
-    
-    return (left, top, width, height)
+
+    bbox = (left, top, width, height)
+    _bbox_cache[key] = bbox
+    _memo_refs[key] = elem
+    return bbox
 
 
 def get_element_z_index(elem: Tag) -> int:
@@ -171,7 +251,19 @@ def get_parent_bbox(parent: Tag) -> tuple[int, int, int, int]:
     
     对于 layer-group，通常需要根据其子元素的范围来计算
     如果没有明确的 style，则假设覆盖整个画布
+
+    结果按元素缓存：同一 parent 会被它的每个子元素各问一次，
+    不缓存时每次都要遍历全部子元素重算。
     """
+    key = id(parent)
+    cached = _parent_bbox_cache.get(key)
+    if cached is not None:
+        return cached
+
+    # 保持既有语义：父容器 bbox 只认内联 style，读不到时按子元素范围聚合。
+    # （曾尝试改为复用 get_element_bbox 以读 CSS 类规则，但会让分母从"子元素
+    # 聚合范围"变成"容器设计尺寸"，例如 40x30/42x32 → 覆盖率 89.3% 跌破 90%
+    # 阈值，导致原本被吸收的背景层不再吸收。属产物行为变更，需单独评审。）
     style = parent.get('style', '')
     left = _parse_style_value(style, 'left')
     top = _parse_style_value(style, 'top')
@@ -198,7 +290,10 @@ def get_parent_bbox(parent: Tag) -> tuple[int, int, int, int]:
                 width = int(max_right - min_left) if max_right > min_left else 0
                 height = int(max_bottom - min_top) if max_bottom > min_top else 0
 
-    return (left, top, width, height)
+    bbox = (left, top, width, height)
+    _parent_bbox_cache[key] = bbox
+    _memo_refs[key] = parent
+    return bbox
 
 
 def calculate_overlap_ratio(elem_bbox: tuple[int, int, int, int], 
@@ -323,13 +418,22 @@ def is_contained_or_compatible_local(
     return is_completely_contained(shifted_bbox, container_bbox)
 
 
-def is_background_leaf(elem: Tag, parent: Tag, siblings: list[Tag]) -> bool:
+def is_background_leaf(
+    elem: Tag,
+    parent: Tag,
+    siblings: list[Tag],
+    sibling_stats: tuple[dict[int, int], dict[int, float]] | None = None,
+) -> bool:
     """判断元素是否是全覆盖背景图层
     
     条件：
     1. 数据类型为 'image' 或 'layer-group'
     2. 覆盖面积 >= 90%
     3. z-index 在同级中最高
+
+    ``sibling_stats`` 可选，形如 ``({}, {})``：在同一 parent 下批量判定时
+    传入同一份空 dict，由本函数惰性填充「兄弟 z-index」与「兄弟覆盖率」，
+    避免每个子元素都重算一遍全部兄弟（O(n²)）。
     """
     
     # 条件 1：数据类型检查
@@ -358,7 +462,18 @@ def is_background_leaf(elem: Tag, parent: Tag, siblings: list[Tag]) -> bool:
         return True  # 唯一的子元素
     
     # 获取所有兄弟的 z-index，包括当前元素
-    all_z = [elem_z] + [get_element_z_index(s) for s in siblings]
+    z_map: dict[int, int] | None = None
+    cov_map: dict[int, float] | None = None
+    if sibling_stats is not None:
+        z_map, cov_map = sibling_stats
+        if not z_map:
+            for sib in siblings:
+                z_map[id(sib)] = get_element_z_index(sib)
+        all_z = list(z_map.values())
+        if id(elem) not in z_map:
+            all_z.append(elem_z)
+    else:
+        all_z = [elem_z] + [get_element_z_index(s) for s in siblings]
     max_z = max(all_z)
     min_z = min(all_z)
     
@@ -369,10 +484,20 @@ def is_background_leaf(elem: Tag, parent: Tag, siblings: list[Tag]) -> bool:
     # 情况 B：z-index 最低，且覆盖面积最大
     # 更宽松的条件：z-index 在最低的 5 个数值内，且覆盖最大
     if elem_z <= min_z + 5:  # 允许 z-index 接近最小值
-        all_coverages = [coverage] + [
-            calculate_overlap_ratio(get_element_bbox(s), parent_bbox)
-            for s in siblings
-        ]
+        if cov_map is not None:
+            if not cov_map:
+                for sib in siblings:
+                    cov_map[id(sib)] = calculate_overlap_ratio(
+                        get_element_bbox(sib), parent_bbox
+                    )
+            all_coverages = list(cov_map.values())
+            if id(elem) not in cov_map:
+                all_coverages.append(coverage)
+        else:
+            all_coverages = [coverage] + [
+                calculate_overlap_ratio(get_element_bbox(s), parent_bbox)
+                for s in siblings
+            ]
         max_coverage = max(all_coverages)
         # 覆盖面积是最大的，且明显高于其他元素
         if coverage >= max_coverage - 0.001:  # 允许浮点误差
@@ -393,28 +518,30 @@ def detect_background_leaves(parent: Tag, debug: bool = False) -> list[Tag]:
     """
     children = [c for c in parent.children if isinstance(c, Tag)]
     bg_leaves = []
+    # 同一 parent 下复用兄弟 z-index / 覆盖率表，避免每个子元素重算全部兄弟
+    sibling_stats: tuple[dict[int, int], dict[int, float]] = ({}, {})
     
     if debug:
         parent_name = parent.get('data-name', parent.get('id', 'unknown'))
         parent_bbox = get_parent_bbox(parent)
-        print(f"  🔍 检查父容器: {parent_name}, bbox={parent_bbox}")
+        logger.info(f"  🔍 检查父容器: {parent_name}, bbox={parent_bbox}")
     
     for child in children:
-        if is_background_leaf(child, parent, children):
+        if is_background_leaf(child, parent, children, sibling_stats):
             bg_leaves.append(child)
             if debug:
                 child_name = child.get('data-name', child.get('id', 'unknown'))
                 child_bbox = get_element_bbox(child)
                 coverage = calculate_overlap_ratio(child_bbox, get_parent_bbox(parent))
                 z_index = get_element_z_index(child)
-                print(f"    ✅ 背景图层: {child_name}, bbox={child_bbox}, coverage={coverage:.2%}, z-index={z_index}")
+                logger.info(f"    ✅ 背景图层: {child_name}, bbox={child_bbox}, coverage={coverage:.2%}, z-index={z_index}")
         elif debug:
             child_name = child.get('data-name', child.get('id', 'unknown'))
             data_type = child.get('data-type', 'unknown')
             child_bbox = get_element_bbox(child)
             coverage = calculate_overlap_ratio(child_bbox, get_parent_bbox(parent))
             z_index = get_element_z_index(child)
-            print(f"    ❌ 非背景: {child_name}, type={data_type}, bbox={child_bbox}, coverage={coverage:.2%}, z-index={z_index}")
+            logger.error(f"    ❌ 非背景: {child_name}, type={data_type}, bbox={child_bbox}, coverage={coverage:.2%}, z-index={z_index}")
     
     return bg_leaves
 
@@ -429,7 +556,8 @@ def detect_image_absorption_hosts(
     目的：补充“全覆盖背景”规则无法覆盖的场景，让 ``data-type=image``
     也能在满足几何包含关系时充当吸收目标。
     """
-    excluded_set = set(excluded or [])
+    # 用 id 而非 Tag 本身做集合键：bs4 的 Tag.__hash__ 会对整棵子树做序列化。
+    excluded_ids = {id(e) for e in (excluded or [])}
     children = [c for c in parent.children if isinstance(c, Tag)]
     parent_bbox = get_parent_bbox(parent)
     _, _, parent_w, parent_h = parent_bbox
@@ -438,7 +566,7 @@ def detect_image_absorption_hosts(
     hosts: list[Tag] = []
 
     for child in children:
-        if child in excluded_set:
+        if id(child) in excluded_ids:
             continue
 
         if child.get('data-type', '') != 'image':
@@ -488,7 +616,7 @@ def detect_image_absorption_hosts(
         if overshadowed_by_higher_image:
             continue
 
-        siblings = [s for s in children if s is not child and s not in excluded_set]
+        siblings = [s for s in children if s is not child and id(s) not in excluded_ids]
         contained = [
             s for s in siblings
             if is_contained_or_compatible_local(get_element_bbox(s), bbox)
@@ -524,7 +652,7 @@ def detect_image_absorption_hosts(
 
         if debug:
             child_name = child.get('data-name', child.get('id', 'unknown'))
-            print(
+            logger.info(
                 f"    ✅ image宿主: {child_name}, bbox={bbox}, "
                 f"contained={len(contained)}, z-index={child_z}"
             )

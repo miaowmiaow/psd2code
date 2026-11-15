@@ -13,10 +13,8 @@
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional, Tuple
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.occluded_layer_pruner import (

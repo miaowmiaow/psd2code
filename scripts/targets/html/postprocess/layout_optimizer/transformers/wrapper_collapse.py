@@ -30,7 +30,11 @@ dom_restructure 切行/切列时会对每个识别成 v-row / v-col 的子集生
 - 同时从 css_rules 删除 wrapper 的 CSS 规则
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class WrapperCollapse:
@@ -57,7 +61,7 @@ class WrapperCollapse:
 
         采用"反复扫描直到稳定"策略：每折叠一个可能让外层也变成单子，需要再扫一轮。
         """
-        print("\n📦 步骤2.5：单子 wrapper 折叠...")
+        logger.info("\n📦 步骤2.5：单子 wrapper 折叠...")
         total_collapsed = 0
         # 多轮扫描（最多 5 轮，避免死循环）
         for _round in range(5):
@@ -71,7 +75,7 @@ class WrapperCollapse:
                 break
         self.stats['wrappers_collapsed'] += total_collapsed
         if total_collapsed > 0:
-            print(f"   ✓ 折叠 {total_collapsed} 个单子 wrapper")
+            logger.info(f"   ✓ 折叠 {total_collapsed} 个单子 wrapper")
 
     def _collect_collapsible_wrappers(self) -> List:
         """采集所有 data-virtual ∈ {row, col} 的 wrapper 元素"""

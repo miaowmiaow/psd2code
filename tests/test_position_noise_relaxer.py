@@ -14,7 +14,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.position_noise_relaxer import (

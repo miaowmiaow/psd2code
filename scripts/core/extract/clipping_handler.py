@@ -12,7 +12,6 @@ PSD 剪贴蒙版 (clipping mask) 处理模块
 from __future__ import annotations
 
 from typing import Any
-from PIL import Image
 import numpy as np
 
 from common.image_utils import ImageArrayUtils
@@ -22,6 +21,10 @@ from core.render.effects.effects_renderer import (
     is_effect_active,
 )
 from .image_ops import _apply_layer_mask
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class ClippingHandler:
@@ -157,7 +160,7 @@ class ClippingHandler:
             base_name = base_layer.name or 'merged'
             clipped_names = [c.name for c in clipped_layers]
             full_name = f'{parent_name}/{base_name}' if parent_name else base_name
-            print(f"{'  ' * depth}🔗 合并剪切蒙版: {base_name} ← {clipped_names}")
+            logger.info(f"{'  ' * depth}🔗 合并剪切蒙版: {base_name} ← {clipped_names}")
 
             # --- 步骤1: 获取 base 原始图层（不含效果）---
             base_raw_img = base_layer.topil()
@@ -267,7 +270,7 @@ class ClippingHandler:
                     canvas_raw[dst_y0:dst_y0+copy_h, dst_x0:dst_x0+copy_w, 3:4] = np.clip(out_alpha, 0, 1)
 
                 except Exception as e:
-                    print(f"{'  ' * depth}  ⚠️  合成 {cl.name} 失败: {e}")
+                    logger.warning(f"{'  ' * depth}  ⚠️  合成 {cl.name} 失败: {e}")
 
             # --- 步骤2.5: 应用 base 图层的 user mask（图层蒙版）---
             merged_raw = ImageArrayUtils.float_array_to_pil(canvas_raw)
@@ -326,11 +329,11 @@ class ClippingHandler:
             rel_path = image_saver(final_img, base_name, depth)
             layer_info['image_path'] = rel_path
 
-            print(f"{'  ' * depth}🖼️  {base_name} [合并{len(clipped_layers)+1}层 {canvas_w}x{canvas_h}] → {rel_path}")
+            logger.info(f"{'  ' * depth}🖼️  {base_name} [合并{len(clipped_layers)+1}层 {canvas_w}x{canvas_h}] → {rel_path}")
             return layer_info
 
         except Exception as e:
-            print(f"{'  ' * depth}❌ 合并剪切蒙版失败 ({base_layer.name}): {e}")
+            logger.error(f"{'  ' * depth}❌ 合并剪切蒙版失败 ({base_layer.name}): {e}")
             import traceback
             traceback.print_exc()
             return None

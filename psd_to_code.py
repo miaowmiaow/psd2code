@@ -13,7 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
-# 禁止生成 __pycache__/*.pyc（保持工作区干净）
+# 禁止为「后续 import 的模块」写 .pyc（保持工作区干净）。
+# 注意：本文件自身的字节码在本行执行前就已写入 __pycache__/，无法自禁。
 sys.dont_write_bytecode = True
 
 # 确保可以以脚本方式直接运行：把 scripts/ 加入 sys.path，所有子包都以顶级包形式导入
@@ -28,6 +29,9 @@ from targets import html as _html_target  # noqa: E402,F401  (register HtmlTarge
 from targets import react as _react_target  # noqa: E402,F401  (register ReactTarget)
 from targets import vue as _vue_target  # noqa: E402,F401  (register VueTarget)
 from framework.context import PipelineContext  # noqa: E402
+from common.log_config import configure as configure_logging, get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -53,6 +57,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-v",
         action="store_true",
         help="Verbose logging",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Fail fast: any LayoutOptimizer transformer error raises instead of "
+            "being recorded in _layout_stats.json['failures'] and skipped. "
+            "Recommended for CI / regression baselines."
+        ),
     )
     parser.add_argument(
         "--no-css-pretty",
@@ -106,21 +119,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # 日志配置只发生在 CLI 入口：库调用方不配置则 INFO 自动静默
+    configure_logging(verbose=args.verbose)
 
     psd_path = Path(args.psd_path).expanduser().resolve()
     if not psd_path.exists():
-        print(f"[psd2code] Error: PSD file not found: {psd_path}", file=sys.stderr)
+        logger.error("[psd2code] Error: PSD file not found: %s", psd_path)
         return 2
     if psd_path.suffix.lower() != ".psd":
-        print(f"[psd2code] Warning: file does not have .psd extension: {psd_path}", file=sys.stderr)
+        logger.warning("[psd2code] Warning: file does not have .psd extension: %s", psd_path)
 
     target_name = args.target.strip().lower()
     target_cls = _registry.get(target_name)
     if target_cls is None:
         available = ", ".join(_registry.list_targets()) or "<none>"
-        print(
-            f"[psd2code] Error: unknown target '{target_name}'. Available: {available}",
-            file=sys.stderr,
+        logger.error(
+            "[psd2code] Error: unknown target '%s'. Available: %s",
+            target_name, available,
         )
         return 2
 
@@ -132,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose,
     )
     # 把 CLI 开关挂到 artifacts，供 LayoutOptimizeStage 消费
+    if args.strict:
+        ctx.set("strict", True)
     if args.no_css_pretty:
         ctx.set("css_pretty_enabled", False)
     ctx.set("css_pretty_style", args.css_style)
@@ -142,11 +159,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.enable_image_layer_flatten:
         ctx.set("image_layer_flatten_enabled", True)
 
-    print(f"[psd2code] target={target_name}  psd={psd_path}")
+    logger.info("[psd2code] target=%s  psd=%s", target_name, psd_path)
     try:
         result_ctx = target.run(ctx)
     except Exception as exc:  # noqa: BLE001
-        print(f"[psd2code] Pipeline failed: {exc}", file=sys.stderr)
+        logger.error("[psd2code] Pipeline failed: %s", exc)
         if args.verbose:
             import traceback
             traceback.print_exc()
@@ -155,9 +172,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = result_ctx.output_dir
     project_root = result_ctx.project_root
     if project_root and project_root != out_dir:
-        print(f"[psd2code] Done. Project: {project_root} (target output: {out_dir})")
+        logger.info("[psd2code] Done. Project: %s (target output: %s)", project_root, out_dir)
     else:
-        print(f"[psd2code] Done. Output: {out_dir}")
+        logger.info("[psd2code] Done. Output: %s", out_dir)
 
     # 自动安装预览页（HTML 目标）：调用完整安装逻辑（复制 + cache-bust + index 内嵌）
     try:
@@ -171,11 +188,11 @@ def main(argv: list[str] | None = None) -> int:
                     mod = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(mod)
                     mod.install(str(out_dir))
-                    print(f"[psd2code] Preview installed via {install_script}")
+                    logger.info("[psd2code] Preview installed via %s", install_script)
             else:
-                print(f"[psd2code] Warning: preview installer not found: {install_script}")
+                logger.warning("[psd2code] Warning: preview installer not found: %s", install_script)
     except Exception as exc:  # noqa: BLE001
-        print(f"[psd2code] Warning: preview install failed: {exc}")
+        logger.warning("[psd2code] Warning: preview install failed: %s", exc)
     return 0
 
 

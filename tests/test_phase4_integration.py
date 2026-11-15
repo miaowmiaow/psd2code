@@ -7,13 +7,11 @@
 """
 
 from unittest.mock import MagicMock
-from pathlib import Path
 
 import pytest
 
 from targets.html.postprocess.layout_optimizer.transformers.dom_restructure import (
     BBox,
-    ClusterConfig,
     DOMRestructure,
     LeafInfo,
     LayoutNode,

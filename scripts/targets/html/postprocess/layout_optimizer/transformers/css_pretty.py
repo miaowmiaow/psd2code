@@ -35,7 +35,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from common.css_utils import _normalize_css_value  # type: ignore
@@ -343,7 +343,6 @@ class CssPretty:
         """
         if not header:
             return header
-        out: List[str] = []
         blocks = cls._split_top_level(header)
         # _split_top_level 只识别"selector { ... }"块，不会包含纯注释/空白；
         # 我们需要保留原始行序、注释、空行。改为：用 split_top_level 找出

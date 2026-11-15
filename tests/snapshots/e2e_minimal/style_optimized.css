@@ -1,0 +1,56 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    width: 100vw;
+    min-height: 100vh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    background: #f0f0f0;
+    /* 字体兜底：PSD 里的设计字体通常不可用，若不声明则浏览器退回衬线 Times，
+       中文落到宋体，字宽/字形都与设计稿差异明显（实测同一段文本会多折一行）。
+       这里优先系统无衬线字体，宽度最接近设计稿。 */
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+#canvas {
+  position: relative;
+  width: 40px;
+  height: 30px;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #fff;
+  /* 锚点必须是 top left：窄屏下 #canvas 宽于视口，``margin: 0 auto`` 会退化为 0，
+       盒子左缘贴在 x=0 且不会居中；若用 top center，缩放后内容会被整体右移
+       （偏移 = 宽/2 × (1 - scale)），表现为左侧一大块空白、右侧被裁掉。 */
+    transform-origin: top left;
+}
+
+.card { position: absolute; left: 0px; top: 0px; z-index: 3; width: 42px; height: 32px; }
+.bg {
+  position: absolute;
+  left: 0px;
+  top: 0px;
+  z-index: 1;
+  width: 40px;
+  height: 30px;
+  background: url("images/bg-<hash>.png") no-repeat;
+}
+.icon {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  z-index: 2;
+  width: 10px;
+  height: 10px;
+  background: url("images/icon-<hash>.png") no-repeat;
+}
+.qianjingtiao {
+  position: absolute;
+  left: 0px;
+  top: 24px;
+  z-index: 4;
+  width: 40px;
+  height: 6px;
+  background: url("images/qianjingtiao-<hash>.png") no-repeat;
+}
+#canvas-wrap { position: relative; width: 100%; overflow: hidden; }

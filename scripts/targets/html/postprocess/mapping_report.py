@@ -231,6 +231,12 @@ def render_mapping_report(
     lines.append(f'- 含 image url: {n_with_image}')
     lines.append(f'- 含 PSD layer 元数据: {n_with_layer}')
     lines.append('')
+    lines.append(
+        '> `abs` 列取自优化后的 CSS，不是 PSD bbox。**组容器可能比 bbox 大 2px**'
+        '（`group_renderer._GROUP_BLEED_PADDING`，防子层贴边的抗锯齿像素被'
+        '`overflow:hidden` 裁切），属预期差异。'
+    )
+    lines.append('')
     lines.append('| section | class | layer_id | psd name | type | abs | image(s) |')
     lines.append('| --- | --- | --- | --- | --- | --- | --- |')
     for sec, cls, lid, name, ltype, abs_str, imgs in rows:

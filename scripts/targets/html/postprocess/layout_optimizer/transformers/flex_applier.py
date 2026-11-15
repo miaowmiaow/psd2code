@@ -3,6 +3,10 @@
 from typing import Dict
 from ..analyzers.layout_analyzer import LayoutAnalyzer
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class FlexApplier:
     """
@@ -32,7 +36,7 @@ class FlexApplier:
         （display:flex + 子元素 margin），并把 v-stack/v-list 等 wrapper
         升级为 positioned 容器。此处跳过这些容器以避免重复处理。
         """
-        print("\n🔧 步骤3：应用flex布局...")
+        logger.info("\n🔧 步骤3：应用flex布局...")
         
         for elem in self.soup.find_all('div'):
             classes = elem.get('class', [])
@@ -89,28 +93,28 @@ class FlexApplier:
                 decor_classes = self._identify_root_container_bg(all_children, decor_classes)
                 content_children = [c for c in all_children if c['class'] not in decor_classes]
                 
-                print(f"   🔍 根容器 #{elem_id} 特殊处理：{len(decor_classes)-len(orig_decor)} 个新装饰")
+                logger.info(f"   🔍 根容器 #{elem_id} 特殊处理：{len(decor_classes)-len(orig_decor)} 个新装饰")
                 
                 if len(content_children) >= 2:
                     # 再次尝试趋势检测（只在内容子集上）
                     try:
                         v_changes, h_changes = self._count_layout_changes(content_children)
-                        print(f"      → 内容子集变化: v={v_changes}, h={h_changes}")
+                        logger.info(f"      → 内容子集变化: v={v_changes}, h={h_changes}")
                         if v_changes >= 2 and v_changes > h_changes:
                             layout_type = 'vertical'
-                            print(f"      → 判定为 vertical ✅")
+                            logger.info("      → 判定为 vertical ✅")
                         elif h_changes >= 2 and h_changes > v_changes:
                             layout_type = 'horizontal'
-                            print(f"      → 判定为 horizontal ✅")
+                            logger.info("      → 判定为 horizontal ✅")
                     except Exception as e:
-                        print(f"      ❌ 重新检测失败: {e}")
+                        logger.error(f"      ❌ 重新检测失败: {e}")
                         pass  # 如果重新检测失败，保留 'none'
 
             elem_name = elem.get('data-name', '') or (f'#{elem_id}' if elem_id else css_selector)
 
             # V10 装饰剥离：打印被分到 bg/decor 的 class（便于排查）
             if decor_classes and layout_type != 'none':
-                print(f"   🎭 {elem_name}: 装饰剥离 {len(decor_classes)} 个 → "
+                logger.info(f"   🎭 {elem_name}: 装饰剥离 {len(decor_classes)} 个 → "
                       f"{sorted(decor_classes)}")
 
             # 应用对应的flex布局
@@ -163,7 +167,7 @@ class FlexApplier:
         """应用垂直布局（flex-col）"""
         decor_classes = decor_classes or set()
         self.stats['flex_applied'] += 1
-        print(f"   ✓ flex-col: {elem_name} (垂直变化:{vertical_changes}, 横向变化:{horizontal_changes})")
+        logger.info(f"   ✓ flex-col: {elem_name} (垂直变化:{vertical_changes}, 横向变化:{horizontal_changes})")
         
         # 步骤1：遍历子元素，记录趋势元素和非趋势元素
         # decor 子元素一律保留 absolute（无论 is_trend 怎么标记），不参与 flex 流
@@ -172,7 +176,7 @@ class FlexApplier:
         non_trend_children = [c for c in all_children
                               if not c['is_trend'] or c['class'] in decor_classes]
         
-        print(f"      → 趋势元素: {len(trend_children)}个, 非趋势元素: {len(non_trend_children)}个")
+        logger.info(f"      → 趋势元素: {len(trend_children)}个, 非趋势元素: {len(non_trend_children)}个")
         
         # 步骤2：存在趋势元素 → 添加flex布局，转换趋势元素为margin
         if trend_children:
@@ -199,8 +203,13 @@ class FlexApplier:
                 # 如果已经有 margin-top（来自 DOM 重构），则保留它
                 if 'margin-top' not in child_css:
                     if idx == first_trend_idx:
-                        # 第一个趋势元素：使用原始top作为margin-top
-                        if child_info['top'] > 0:
+                        # 第一个趋势元素：使用原始 top 作为 margin-top。
+                        # 必须保留负值：相邻元素的 gap = top - prev_bottom，而
+                        # prev_bottom 用的是带负值的 top；若这里把负首偏移丢掉，
+                        # 那段负偏移会在下一个元素的 gap 里被重复计入，导致整列
+                        # 内容整体下移（典型：南瓜大作战评论区首元素 top=-101，
+                        # 第二行 gap 被算成 116，整块评论下移约 94px）。
+                        if child_info['top'] != 0:
                             child_css['margin-top'] = f"{child_info['top']}px"
                     else:
                         # 后续趋势元素：计算与前一个元素的间距
@@ -251,9 +260,9 @@ class FlexApplier:
         if non_trend_children:
             if 'position' not in css:
                 css['position'] = 'relative'
-                print(f"      → 添加 relative（包含{len(non_trend_children)}个非趋势元素）")
+                logger.info(f"      → 添加 relative（包含{len(non_trend_children)}个非趋势元素）")
             else:
-                print(f"      → 已有 position={css['position']}（包含{len(non_trend_children)}个非趋势元素）")
+                logger.info(f"      → 已有 position={css['position']}（包含{len(non_trend_children)}个非趋势元素）")
 
             # 只补齐 position: absolute，保持原 top/left 不动
             for child_info in non_trend_children:
@@ -265,7 +274,7 @@ class FlexApplier:
         """应用横向布局（flex-row）"""
         decor_classes = decor_classes or set()
         self.stats['flex_applied'] += 1
-        print(f"   ✓ flex-row: {elem_name} (横向变化:{horizontal_changes}, 垂直变化:{vertical_changes})")
+        logger.info(f"   ✓ flex-row: {elem_name} (横向变化:{horizontal_changes}, 垂直变化:{vertical_changes})")
         
         # 步骤1：遍历子元素，记录趋势元素和非趋势元素
         # decor 子元素一律保留 absolute（无论 is_trend 怎么标记），不参与 flex 流
@@ -274,7 +283,7 @@ class FlexApplier:
         non_trend_children = [c for c in all_children
                               if not c['is_trend'] or c['class'] in decor_classes]
         
-        print(f"      → 趋势元素: {len(trend_children)}个, 非趋势元素: {len(non_trend_children)}个")
+        logger.info(f"      → 趋势元素: {len(trend_children)}个, 非趋势元素: {len(non_trend_children)}个")
         
         # 步骤2：存在趋势元素 → 添加flex布局，转换趋势元素为margin
         if trend_children:
@@ -331,9 +340,9 @@ class FlexApplier:
         if non_trend_children:
             if 'position' not in css:
                 css['position'] = 'relative'
-                print(f"      → 添加 relative（包含{len(non_trend_children)}个非趋势元素）")
+                logger.info(f"      → 添加 relative（包含{len(non_trend_children)}个非趋势元素）")
             else:
-                print(f"      → 已有 position={css['position']}（包含{len(non_trend_children)}个非趋势元素）")
+                logger.info(f"      → 已有 position={css['position']}（包含{len(non_trend_children)}个非趋势元素）")
 
             for child_info in non_trend_children:
                 child_css = self.css_rules.get(f'.{child_info["class"]}', {})
@@ -361,7 +370,7 @@ class FlexApplier:
         if has_absolute_children:
             if 'position' not in css:
                 css['position'] = 'relative'
-                print(f"   ✓ 添加 relative: {elem_name}（容器包含absolute子元素）")
+                logger.info(f"   ✓ 添加 relative: {elem_name}（容器包含absolute子元素）")
 
     def _identify_root_container_bg(self, all_children, existing_decor):
         """根容器特殊处理：识别覆盖层和背景。

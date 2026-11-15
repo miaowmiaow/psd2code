@@ -17,7 +17,6 @@ import logging
 from typing import Literal
 
 import numpy as np
-from numpy.typing import NDArray
 
 from psd_tools.constants import ColorMode
 from psd_tools.api.adjustments import BlackAndWhite

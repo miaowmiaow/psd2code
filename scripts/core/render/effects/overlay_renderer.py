@@ -9,6 +9,10 @@ from typing import Any
 import math
 import numpy as np
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class ColorOverlayRenderer:
     """颜色叠加效果渲染器"""
@@ -59,7 +63,7 @@ class ColorOverlayRenderer:
             ext_rgb[:, :, :] = ext_rgb * (1.0 - has_pixel_3d) + blended * has_pixel_3d
             
         except Exception as e:
-            print(f"      ⚠️  颜色叠加渲染失败: {e}")
+            logger.warning(f"      ⚠️  颜色叠加渲染失败: {e}")
     
     @staticmethod
     def _extract_color(desc: Any) -> tuple[float, float, float]:
@@ -261,7 +265,7 @@ class GradientOverlayRenderer:
             blended = ext_rgb * (1.0 - effective_opacity) + gradient_rgb * effective_opacity
             ext_rgb[:, :, :] = ext_rgb * (1.0 - has_pixel_3d) + blended * has_pixel_3d
             
-            print(f"      🌈 渐变叠加已渲染 (angle={angle_deg}°, {len(color_stops)} 色标)")
+            logger.info(f"      🌈 渐变叠加已渲染 (angle={angle_deg}°, {len(color_stops)} 色标)")
             
         except Exception as e:
-            print(f"      ⚠️  渐变叠加渲染失败: {e}")
+            logger.warning(f"      ⚠️  渐变叠加渲染失败: {e}")

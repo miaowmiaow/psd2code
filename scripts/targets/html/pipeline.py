@@ -4,13 +4,15 @@ P3: Multi-stage, IR-driven pipeline. IR is the authoritative representation
 between ``core`` (PSD parsing + asset extraction) and ``targets/html``
 (codegen + postprocess + emit).
 
-Stage chain:
+Stage chain（由 ``build_html_prefix_stages`` 统一提供，React / Vue 直接复用）:
     1. LoadPsdStage              — open the .psd (psd-tools)
     2. ParseToIrStage            — PSD → IR (+ export all images to disk)
     3. HtmlCodegenStage          — IR → HTML/CSS/metadata/README
-    4. PrunePreOptimizeStage     — 基于 index.html 剔除被遮挡 / 全透明图层
+    4. BgNestingRestructureStage — 背景图层嵌套重组（在剔除 / 优化之前）
+    5. PrunePreOptimizeStage     — 基于 index.html 剔除被遮挡 / 全透明图层
                                    （直接覆盖 index.html / style.css）
-    5. LayoutOptimizeStage       — postprocess the raw HTML/CSS
+    6. LayoutOptimizeStage       — postprocess the raw HTML/CSS
+                                   （含步骤 2.9 背景层吸收，在 CssDedup 之前）
 
 为何 Prune 在 Optimize 之前（2026-05-27）：
 - 剔除若发生在 LayoutOptimizer 内部或之后，DOMRestructure / FlexApplier 等
@@ -26,6 +28,26 @@ import shutil
 from pathlib import Path
 
 from framework import Pipeline, PipelineContext, Stage
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# postprocess 链内部传递"已解析结果"的 ctx 键
+#
+# 契约（很重要）：
+#   * 只在**成功写盘之后**写入——ctx 里的对象必须与磁盘上的 index.html /
+#     style.css 内容一致，否则下游会看到"内存已改、磁盘未改"两种真相；
+#   * 下游 stage 命中即免去一次重新解析，未命中（键缺失 / 值为 None）时
+#     必须回退到"读盘 + 解析"，保证 stage 可以单独运行（测试 / 其它 target）；
+#   * 对象只在 postprocess 链内使用，最后一个消费者负责置 None 释放。
+# ---------------------------------------------------------------------------
+_CTX_HTML_SOUP = "html_soup"
+_CTX_CSS_RULES = "html_css_rules"
+_CTX_CSS_HEADER = "html_css_header"
+
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +203,10 @@ class BgNestingRestructureStage(Stage):
     name = "bg_nesting_restructure"
     
     def run(self, ctx: PipelineContext) -> PipelineContext:
-        from targets.html.postprocess.bg_nesting_restructure import restructure_by_bg_nesting  # type: ignore
+        from bs4 import BeautifulSoup  # type: ignore
+        from targets.html.postprocess.bg_nesting_restructure.restructurer import (  # type: ignore
+            restructure_by_bg_nesting_in_soup,
+        )
         
         html_path = ctx.get("html_path")
         if not html_path:
@@ -200,7 +225,7 @@ class BgNestingRestructureStage(Stage):
                 parse_css_to_dict,
             )
 
-            print("\n🔄 应用背景图层嵌套重组...")
+            logger.info("\n🔄 应用背景图层嵌套重组...")
 
             # 读取 HTML 和 CSS
             html_content = html_path.read_text(encoding="utf-8")
@@ -214,16 +239,23 @@ class BgNestingRestructureStage(Stage):
                 css_header = extract_global_css_header(css_content)
                 css_rules = parse_css_to_dict(css_content)
 
-            # 执行背景图层嵌套重组（HTML + CSS 规则联动）
-            restructured_html = restructure_by_bg_nesting(
-                html_content,
+            # 执行背景图层嵌套重组（HTML + CSS 规则联动）。
+            # 直接在 soup 上原地重组：后续 stage 复用同一个 DOM，省掉一次解析。
+            soup = BeautifulSoup(html_content, "html.parser")
+            restructure_by_bg_nesting_in_soup(
+                soup,
                 css_content=css_content,
                 css_rules=css_rules,
                 debug=False,
             )
+            restructured_html = str(soup)
 
             # 写回 HTML
             html_path.write_text(restructured_html, encoding="utf-8")
+
+            # 仅在落盘成功后把 DOM 交给下游：ctx 里的对象必须与磁盘文件同步，
+            # 否则后续 stage 会在"内存已改、磁盘未改"的两种真相之间摇摆。
+            ctx.set(_CTX_HTML_SOUP, soup)
 
             # 写回 CSS（如果存在）
             if css_path.exists() and css_rules is not None:
@@ -231,6 +263,12 @@ class BgNestingRestructureStage(Stage):
                     dict_to_css(css_rules, header=css_header),
                     encoding="utf-8",
                 )
+
+            # 把解析结果留给后续 stage 复用：同一份 CSS 在 prune / layout_optimize
+            # 里各解析一次是纯重复工作（lex/parse 约占总耗时 8%）。
+            if css_rules is not None:
+                ctx.set(_CTX_CSS_RULES, css_rules)
+                ctx.set(_CTX_CSS_HEADER, css_header)
 
             ctx.log(f"✅ 背景图层嵌套重组完成: {html_path}")
             return ctx
@@ -280,14 +318,27 @@ class PrunePreOptimizeStage(Stage):
 
         try:
             html_content = html_path.read_text(encoding="utf-8")
-            css_content = css_path.read_text(encoding="utf-8")
-            css_header = extract_global_css_header(css_content)
-            css_rules = parse_css_to_dict(css_content)
+            # 复用上游 stage 解析好的 CSS（未命中时再自行解析）
+            css_rules = ctx.get(_CTX_CSS_RULES)
+            css_header = ctx.get(_CTX_CSS_HEADER, "")
+            if css_rules is None:
+                css_content = css_path.read_text(encoding="utf-8")
+                css_header = extract_global_css_header(css_content)
+                css_rules = parse_css_to_dict(css_content)
+
+            # 复用上游 stage 解析好的 DOM；缺失时自行解析。
+            # 注意：解析结果在写盘成功之后才放回 ctx（见下方），避免 prune 中途
+            # 失败却把"半改的 DOM"留给下游，导致 index.html 与优化版不一致。
+            soup = ctx.get(_CTX_HTML_SOUP)
+            if soup is None:
+                from bs4 import BeautifulSoup  # type: ignore
+                soup = BeautifulSoup(html_content, "html.parser")
 
             html_pruned, css_rules_pruned, prune_stats = prune_index_html(
                 html_content=html_content,
                 css_rules=css_rules,
                 html_dir=html_path.parent,
+                soup=soup,
             )
 
             pruned_n = prune_stats.get("occluded_layers_pruned", 0)
@@ -310,8 +361,16 @@ class PrunePreOptimizeStage(Stage):
                 ctx.log("pre-optimize prune: 无可剔除图层")
 
             ctx.set("prune_stats", prune_stats)
+            # 回写：prune 可能改写 css_rules（trim 后的 url / 被删规则的类）
+            ctx.set(_CTX_CSS_RULES, css_rules_pruned)
+            ctx.set(_CTX_CSS_HEADER, css_header)
+            # 落盘（或确认无需落盘）之后才把 DOM 交给下游
+            ctx.set(_CTX_HTML_SOUP, soup)
         except Exception as e:  # noqa: BLE001
-            print(f"⚠️  被遮挡图层剔除失败（保留原始 index.html）: {e}")
+            logger.warning(f"⚠️  被遮挡图层剔除失败（保留原始 index.html）: {e}")
+            # DOM 可能已被部分修改、但磁盘仍是旧内容 → 丢弃缓存，强制下游重解析
+            ctx.set(_CTX_HTML_SOUP, None)
+            ctx.set(_CTX_CSS_RULES, None)
             import traceback
             traceback.print_exc()
 
@@ -340,9 +399,14 @@ class LayoutOptimizeStage(Stage):
             return ctx
 
         try:
-            print("\n🎨 应用智能布局优化...")
-            html_content = html_path.read_text(encoding="utf-8")
-            css_content = css_path.read_text(encoding="utf-8")
+            logger.info("\n🎨 应用智能布局优化...")
+            # 上游已解析过 DOM 时不再读盘：optimize_layout 会直接在该 DOM 上
+            # 原地优化，html_content 只是它缺失时的解析源（避免两个真源）。
+            soup = ctx.get(_CTX_HTML_SOUP)
+            html_content = "" if soup is not None else html_path.read_text(encoding="utf-8")
+            # 复用上游 stage 的 CSS 解析结果（未命中时再读盘解析）
+            css_rules = ctx.get(_CTX_CSS_RULES)
+            css_header = ctx.get(_CTX_CSS_HEADER)
             from common.css_utils import extract_global_css_header  # type: ignore
             from targets.html.postprocess.layout_optimizer.transformers.css_pretty import (  # type: ignore
                 CssPrettyConfig,
@@ -350,8 +414,10 @@ class LayoutOptimizeStage(Stage):
             from targets.html.postprocess.layout_optimizer.transformers.image_layer_flatten import (  # type: ignore
                 FlattenConfig,
             )
-            css_header = extract_global_css_header(css_content)
-            css_rules = parse_css_to_dict(css_content)
+            if css_rules is None or css_header is None:
+                css_content = css_path.read_text(encoding="utf-8")
+                css_header = extract_global_css_header(css_content)
+                css_rules = parse_css_to_dict(css_content)
             # CLI --no-css-pretty 关闭美化，仅做语义优化（dict_to_css 输出）
             pretty_enabled = ctx.get("css_pretty_enabled", True)
             # CLI --css-style 选择 compact（默认，紧凑接近 figma）/ expanded（开发友好详尽）
@@ -375,6 +441,7 @@ class LayoutOptimizeStage(Stage):
                 section_comments=False,
                 merge_group_comment=False,
             )
+            # 复用上游 DOM：layout 优化全程在同一份 soup 上原地进行，省一次解析。
             html_opt, css_opt, stats = optimize_layout(
                 html_content,
                 css_rules,
@@ -383,16 +450,26 @@ class LayoutOptimizeStage(Stage):
                 images_dir=(html_path.parent / "images") if smart_merge else None,
                 flatten_config=FlattenConfig(enabled=image_layer_flatten_enabled),
                 strict=strict,
+                soup=soup,
             )
+
+            # 背景层吸收已并入 LayoutOptimizer（步骤 2.9）；这里仅把子统计
+            # 透出到 ctx，保持与原 BackgroundLayerAbsorptionStage 的 artifacts 兼容。
+            if stats.get("bg_absorption"):
+                ctx.set("bg_absorption_stats", stats["bg_absorption"])
 
             self._emit_optimized_files(
                 ctx, html_opt, css_opt, stats,
                 html_path, css_path, css_header, smart_merge, dict_to_css,
             )
         except Exception as e:  # noqa: BLE001
-            print(f"⚠️  布局优化失败（保留原始版本）: {e}")
+            logger.warning(f"⚠️  布局优化失败（保留原始版本）: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # DOM 只在 postprocess 链内复用；最后一个消费者负责释放，
+            # 避免 ctx 在整个转换周期里持有整棵 BeautifulSoup 树。
+            ctx.set(_CTX_HTML_SOUP, None)
 
         return ctx
 
@@ -423,6 +500,9 @@ class LayoutOptimizeStage(Stage):
         html_opt = html_opt.replace('href="style.css"', 'href="style_optimized.css"')
 
         # 剥离 dev metadata（data-name / data-type / id="layer-*"）→ layer_map.json
+        # 注意：这里必须走「字符串 → 重新解析」的路径。直接在 LayoutOptimizer 的
+        # soup 上剥离会保留其排版中的一处空白文本节点，导致 index_optimized.html
+        # 与既有产物相差一个空行（实测）；如需省这次解析，必须先解决该空白差异。
         from targets.html.postprocess.strip_dev_metadata import (  # type: ignore
             strip_and_collect,
             write_layer_map,
@@ -484,13 +564,13 @@ class LayoutOptimizeStage(Stage):
                 )
                 stats["bg_flatten"] = bg_stats
                 if bg_stats.get("rules_flattened"):
-                    print(
+                    logger.info(
                         f"   - 背景合成: {bg_stats['rules_flattened']} 规则 "
                         f"(折叠 {bg_stats['layers_collapsed']} 层, "
                         f"节省 {bg_stats['bytes_saved'] / 1024:.1f} KB)"
                     )
             except Exception as e:  # noqa: BLE001
-                print(f"⚠️  背景合成失败（保留多层 CSS）: {e}")
+                logger.warning(f"⚠️  背景合成失败（保留多层 CSS）: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -505,13 +585,13 @@ class LayoutOptimizeStage(Stage):
         )
         html_opt_path.write_text(html_opt, encoding="utf-8")
 
-        print(f"✅ 布局优化完成！")
-        print(f"   原始版本: {html_path}")
-        print(f"   优化版本: {html_opt_path}")
-        print(f"   元数据映射: {map_path}")
+        logger.info("✅ 布局优化完成！")
+        logger.info(f"   原始版本: {html_path}")
+        logger.info(f"   优化版本: {html_opt_path}")
+        logger.info(f"   元数据映射: {map_path}")
         if alias_map:
-            print(f"   类名别名表: {alias_path} ({len(alias_map)} 条)")
-        print(
+            logger.info(f"   类名别名表: {alias_path} ({len(alias_map)} 条)")
+        logger.info(
             f"   统计: DOM 重构 {stats['dom_restructured']} 个, "
             f"flex 应用 {stats['flex_applied']} 个"
         )
@@ -523,98 +603,61 @@ class LayoutOptimizeStage(Stage):
             )
             mapping_path, image_index_path = write_mapping_reports(html_opt_path.parent)
             if mapping_path:
-                print(f"   映射报告: {mapping_path}")
+                logger.info(f"   映射报告: {mapping_path}")
             if image_index_path:
-                print(f"   图片索引: {image_index_path}")
+                logger.info(f"   图片索引: {image_index_path}")
         except Exception as e:  # noqa: BLE001
-            print(f"⚠️  mapping report 生成失败: {e}")
+            logger.warning(f"⚠️  mapping report 生成失败: {e}")
+
+        # 优化统计 + 失败明细落盘：这是排查"某步骤被静默跳过"的唯一证据
+        # （LayoutOptimizer 容错模式只打 warning，不留文件；CI 需要可断言的产物）
+        try:
+            layout_payload = {
+                "version": 1,
+                "failures": stats.get("_failures", []),
+                "counters": {
+                    k: v for k, v in stats.items() if not k.startswith("_")
+                },
+            }
+            stats_path = html_opt_path.parent / "_layout_stats.json"
+            stats_path.write_text(
+                _json.dumps(layout_payload, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"⚠️  优化统计落盘失败: {e}")
 
         ctx.set("html_path", str(html_opt_path))
         ctx.set("layout_stats", stats)
 
 
 # ---------------------------------------------------------------------------
-# Stage 6: Final Pass — 背景层吸收优化
-# ---------------------------------------------------------------------------
-
-class BackgroundLayerAbsorptionStage(Stage):
-    """背景层吸收优化：识别并吸收背景层元素到父容器（V2 安全版）。
-
-    运行在 LayoutOptimizeStage 之后的独立优化流程。
-    处理对象：index_optimized.html / style_optimized.css
-    
-    V2 特点：
-    - 使用 BeautifulSoup 而非正则表达式（更可靠）
-    - 每个容器分配唯一 ID，避免 CSS 全局污染
-    - 明确的容器身份管理，确保选择器与 DOM 元素的对应关系正确
-    """
-
-    name = "background_layer_absorption"
-
-    def run(self, ctx: PipelineContext) -> PipelineContext:
-        from common.css_utils import dict_to_css, parse_css_to_dict  # type: ignore
-        from targets.html.postprocess.layout_optimizer.transformers.background_layer_absorber_v2 import (  # type: ignore
-            absorb_background_layers_safe,
-        )
-
-        html_path = ctx.get("html_path")
-        if not html_path:
-            ctx.log("background_layer_absorption: skipped (no html_path)")
-            return ctx
-
-        html_path = Path(html_path)
-        css_path = html_path.parent / "style_optimized.css"
-
-        if not (html_path.exists() and css_path.exists()):
-            ctx.log("background_layer_absorption: skipped (optimized html/css missing)")
-            return ctx
-
-        try:
-            from common.css_utils import extract_global_css_header  # type: ignore
-
-            print("\n🎨 应用背景层吸收优化（V2 安全版）...")
-            html_content = html_path.read_text(encoding="utf-8")
-            css_content = css_path.read_text(encoding="utf-8")
-            css_header = extract_global_css_header(css_content)
-            css_rules = parse_css_to_dict(css_content)
-
-            html_final, css_final, stats = absorb_background_layers_safe(html_content, css_rules)
-
-            if stats.get("bg_layers_absorbed", 0) > 0:
-                # 写入优化结果
-                html_path.write_text(html_final, encoding="utf-8")
-                css_final_text = dict_to_css(css_final, header=css_header)
-                css_path.write_text(css_final_text, encoding="utf-8")
-
-                print(
-                    f"   - 背景层吸收: 吸收 {stats['bg_layers_absorbed']} 个, "
-                    f"移除 {stats['bg_elements_removed']} 个元素"
-                )
-                if "absorbed_element" in stats:
-                    print(f"      (吸收的元素: {stats['absorbed_element']})")
-                ctx.set("bg_absorption_stats", stats)
-            else:
-                print("   - 背景层吸收: 无符合条件的背景层")
-
-        except Exception as e:  # noqa: BLE001
-            print(f"⚠️  背景层吸收失败（保留优化版本）: {e}")
-            import traceback
-            traceback.print_exc()
-
-        return ctx
-
-
-# ---------------------------------------------------------------------------
 # Pipeline assembly
 # ---------------------------------------------------------------------------
 
-def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
-    return Pipeline([
-        LoadPsdStage(),
+def build_html_prefix_stages(subdir_name: str | None = None) -> list[Stage]:
+    """HTML 中间产物的标准 Stage 链（所有 target 共用）。
+
+    React / Vue target 都是「先生成 HTML 产物、再二次转换」，因此这条链路必须
+    由三端共享 —— 任何一次 HTML 侧优化升级都会自动惠及 React / Vue。
+
+    ``subdir_name``：HTML 中间产物落盘子目录。``None`` 时取 ``ctx.target_name``
+    （``--target html`` → ``html/``）；React / Vue 需显式传 ``"html"``，避免把
+    中间产物写进各自的 ``react/`` / ``vue/`` 目录。
+
+    注意：背景层吸收（BackgroundLayerAbsorption）已收进
+    ``LayoutOptimizer``（步骤 2.9，在 CssDedup 之前），因此这里不再有
+    独立的吸收 Stage。
+    """
+    return [
+        LoadPsdStage(subdir_name=subdir_name),
         ParseToIrStage(),
         HtmlCodegenStage(),
         BgNestingRestructureStage(),  # 背景图层嵌套重组（在优化前）
         PrunePreOptimizeStage(),
         LayoutOptimizeStage(),
-        BackgroundLayerAbsorptionStage(),
-    ])
+    ]
+
+
+def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
+    return Pipeline(build_html_prefix_stages())

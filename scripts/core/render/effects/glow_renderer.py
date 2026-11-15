@@ -11,6 +11,10 @@ from PIL import Image, ImageFilter
 
 from common.image_utils import ImageArrayUtils
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class GlowRenderer:
     """发光效果渲染器基类"""
@@ -78,7 +82,7 @@ class OuterGlowRenderer(GlowRenderer):
             return out
             
         except Exception as e:
-            print(f"      ⚠️  外发光渲染失败: {e}")
+            logger.warning(f"      ⚠️  外发光渲染失败: {e}")
             return None
     
     @staticmethod
@@ -141,5 +145,5 @@ class InnerGlowRenderer(GlowRenderer):
             return out
             
         except Exception as e:
-            print(f"      ⚠️  内发光渲染失败: {e}")
+            logger.warning(f"      ⚠️  内发光渲染失败: {e}")
             return None

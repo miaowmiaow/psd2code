@@ -13,7 +13,6 @@
   - _provenance_comment 坐标溯源注释
   - render() 端到端
 """
-import pytest
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.css_pretty import (

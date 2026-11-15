@@ -19,12 +19,22 @@ import shutil
 from typing import List
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SCRIPTS_DIR = os.path.join(ROOT, 'scripts')
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from common.log_config import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
+
 TEMPLATE_DIR = os.path.join(ROOT, 'scripts', 'preview')
 TEMPLATE_FILES = ['preview.html', 'preview.css', 'preview.js']
 
 def run_converter(argv: List[str]) -> int:
     cmd = [sys.executable, os.path.join(ROOT, 'psd_to_code.py')] + argv
-    print('运行转换：', ' '.join(cmd))
+    logger.info('运行转换：%s', ' '.join(cmd))
     ret = subprocess.run(cmd)
     return ret.returncode
 
@@ -63,9 +73,9 @@ def install_to_dirs(dirs: List[str]):
             dst = os.path.join(d, f)
             try:
                 shutil.copyfile(src, dst)
-                print(f'已复制 {f} -> {d}')
+                logger.info(f'已复制 {f} -> {d}')
             except Exception as e:
-                print(f'复制失败 {src} -> {dst}: {e}')
+                logger.info(f'复制失败 {src} -> {dst}: {e}')
         # 嵌入 index.html 到 preview.html 以便本地 file:// 预览可访问内容
         index_path = os.path.join(d, 'index.html')
         preview_path = os.path.join(d, 'preview.html')
@@ -75,7 +85,8 @@ def install_to_dirs(dirs: List[str]):
                     index_html = f.read()
                 # 内联 CSS 与图片以避免 file:// 加载限制
                 def inline_resources(html, base_dir):
-                    import re, base64
+                    import re
+                    import base64
 
                     def repl_link(m):
                         tag = m.group(0)
@@ -144,9 +155,9 @@ def install_to_dirs(dirs: List[str]):
                         preview_text = preview_text + embed_tag
                     with open(preview_path, 'w', encoding='utf-8') as f:
                         f.write(preview_text)
-                    print(f'已将 index.html 嵌入到 {preview_path}（用于离线预览）')
+                    logger.info(f'已将 index.html 嵌入到 {preview_path}（用于离线预览）')
             except Exception as exc:
-                print('嵌入 index.html 失败：', exc)
+                logger.warning('嵌入 index.html 失败：%s', exc)
 
 def default_output_base() -> str:
     try:
@@ -161,12 +172,12 @@ def main():
     start_ts = time.time()
     code = run_converter(argv)
     if code != 0:
-        print('转换器返回非零退出码，停止安装。')
+        logger.info('转换器返回非零退出码，停止安装。')
         sys.exit(code)
 
     output_base = default_output_base()
     if not os.path.isdir(output_base):
-        print('输出基目录不存在: ', output_base)
+        logger.info('输出基目录不存在: %s', output_base)
         sys.exit(0)
 
     recent = find_recent_index_html(output_base, start_ts)
@@ -179,11 +190,14 @@ def main():
             targets = [os.path.dirname(most)]
 
     if not targets:
-        print('未找到任何 index.html；将预览文件复制到输出基目录：', output_base)
+        logger.info('未找到任何 index.html；将预览文件复制到输出基目录：%s', output_base)
         targets = [output_base]
 
     targets = list(dict.fromkeys(targets))
     install_to_dirs(targets)
 
 if __name__ == '__main__':
+    from common.log_config import configure
+
+    configure()
     main()

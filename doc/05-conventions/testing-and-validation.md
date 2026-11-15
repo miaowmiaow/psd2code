@@ -52,14 +52,50 @@ diff -rq /tmp/psd2code-baseline .codebuddy/skills/psd2code/output
 ## Lint
 
 ```bash
-# pyright / mypy （可选）
-# 至少保证无编辑器 lint 红波浪
-
-# 如果项目有 ruff / black 规则：
-ruff check .codebuddy/skills/psd2code/scripts
+ruff check .          # 配置见 pyproject.toml [tool.ruff]
 ```
 
-提交前确保 **全项目 lint 零错误**（包括 type 检查与风格检查）。
+CI 会拦截 lint 错误。当前规则集是刻意收敛的「真问题」子集：
+
+| 规则 | 覆盖内容 |
+| ---- | -------- |
+| `E4` / `E7` / `E9` | import 位置、语句结构、语法类错误 |
+| `F` | 未使用导入/变量、未定义名、f-string 占位符 |
+
+风格类规则（行宽 / import 排序 / 命名）暂未开启 —— 代码里仍有大量历史风格，
+一次性开启会让门禁长期变红。要引入请先整体格式化，再单独提交。
+
+## 自动化门禁（CI）
+
+`.github/workflows/ci.yml` 在 Python 3.10 / 3.11 / 3.12 上依次执行：
+
+1. `python -m compileall -q scripts psd_to_code.py` —— 语法检查
+2. `ruff check .` —— lint
+3. `pytest -q` —— 全量单测 + e2e
+
+### e2e 冒烟 + 产物快照
+
+`tests/test_e2e_smoke.py` 用 `tests/psd_factory.py` **现场生成**一份最小合法
+PSD（40×30，1 组 3 层），跑完整 CLI（含 React / Vue target），断言：
+
+- 产物清单、图片数量、语义类名（中文图层名 → `bg` / `icon` / `card`）；
+- `index_optimized.html` 已剥离 dev metadata；
+- `style_optimized.css?v=<md5>` 与最终 CSS 内容一致（缓存版本号回归）；
+- 产物与 `tests/snapshots/e2e_minimal/` 的归一化快照一致；
+- `_layout_stats.json` 的 `failures` 为空（否则优化器某步崩了也不会有人知道）；
+- `style_optimized.css` 不含无效的 `scale(calc(...))`，缩放逻辑在 `main.js: fitCanvas()`；
+- `metadata.json` / `config.__version__` / `codegen.version` 三处产物格式版本一致；
+- `--strict`、`--css-style expanded`、`--no-css-pretty`、`--no-smart-merge` 四个变体各跑一遍。
+
+改动了 codegen / 优化器的**预期行为**时，需要同步更新快照：
+
+```bash
+P2C_UPDATE_SNAPSHOTS=1 pytest tests/test_e2e_smoke.py
+git diff tests/snapshots/     # 逐行 review，确认是"预期变化"而不是回归
+```
+
+快照里的图片名做了归一化（`-<6位哈希>.png` → `-<hash>.png`），因此换
+Pillow / zlib 版本不会造成假失败。
 
 ## 手动烟测
 

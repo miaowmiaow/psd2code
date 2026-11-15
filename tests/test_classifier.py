@@ -5,10 +5,8 @@ All tests use mock PSD layer objects (no real PSD files required).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-import numpy as np
 
 from psd_tools.constants import BlendMode
 

@@ -9,6 +9,10 @@ from typing import Dict, List, Optional
 from ..data_types import BBox, LeafInfo
 from .base import DOMHandler
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class ReclassifyHandler(DOMHandler):
     """重分类 Handler - Stack → Col 反向升级"""
@@ -28,7 +32,7 @@ class ReclassifyHandler(DOMHandler):
                 absorbed_containers.append(container)
 
         if stats_absorbed > 0:
-            print(f"    🌐 容器背景吸收 pass: 共吸收 {stats_absorbed} 个 image leaf 为容器 background")
+            logger.info(f"    🌐 容器背景吸收 pass: 共吸收 {stats_absorbed} 个 image leaf 为容器 background")
 
         if self.owner.config.enable_stack_to_col_reclassify and absorbed_containers:
             self._reclassify_stacks_after_bg_absorption(absorbed_containers)
@@ -236,7 +240,7 @@ class ReclassifyHandler(DOMHandler):
             if self._try_reclassify_stack_to_col(container):
                 upgraded += 1
         if upgraded > 0:
-            print(f"    🔄 Stack→Col 反向升级 pass: 升级 {upgraded} 个 v-stack 为 v-col")
+            logger.info(f"    🔄 Stack→Col 反向升级 pass: 升级 {upgraded} 个 v-stack 为 v-col")
 
     def _try_reclassify_stack_to_col(self, container) -> bool:
         """对单个 container 尝试 stack → col 升级。"""

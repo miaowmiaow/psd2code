@@ -5,6 +5,7 @@ All tests are pure in-memory, no PSD or filesystem access required.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -35,15 +36,17 @@ class TestPipelineContext:
         assert ctx.get("missing") is None
         assert ctx.get("missing", "default") == "default"
 
-    def test_log_verbose(self, capsys):
+    def test_log_verbose(self, caplog):
         ctx = PipelineContext(psd_path=Path("x.psd"), verbose=True)
-        ctx.log("hello")
-        assert "hello" in capsys.readouterr().out
+        with caplog.at_level(logging.INFO, logger="psd2code"):
+            ctx.log("hello")
+        assert "hello" in caplog.text
 
-    def test_log_not_verbose(self, capsys):
+    def test_log_not_verbose(self, caplog):
         ctx = PipelineContext(psd_path=Path("x.psd"), verbose=False)
-        ctx.log("secret")
-        assert capsys.readouterr().out == ""
+        with caplog.at_level(logging.INFO, logger="psd2code"):
+            ctx.log("secret")
+        assert caplog.text == ""
 
 
 # ===================================================================
@@ -183,13 +186,13 @@ class TestHooks:
         p.run(ctx)
         # NullHook is no-op, just ensure no exceptions
 
-    def test_logging_hook(self, capsys):
+    def test_logging_hook(self, caplog):
         hook = LoggingHook(verbose=True)
         ctx = PipelineContext(psd_path=Path("x.psd"), hook=hook)
         p = Pipeline([_IncrementStage()])
-        p.run(ctx)
-        out = capsys.readouterr().out
-        assert "increment" in out
+        with caplog.at_level(logging.INFO, logger="psd2code"):
+            p.run(ctx)
+        assert "increment" in caplog.text
 
     def test_recording_hook_events(self):
         hook = _RecordingHook()

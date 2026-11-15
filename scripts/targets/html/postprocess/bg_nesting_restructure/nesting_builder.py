@@ -1,20 +1,21 @@
 """构建背景图层嵌套关系图"""
 
-from typing import Any
 from bs4 import Tag
 from .detector import get_element_bbox, is_completely_contained
 
 
-def build_bg_containment_graph(bg_leaves: list[Tag]) -> dict[Tag, list[Tag]]:
+def build_bg_containment_graph(bg_leaves: list[Tag]) -> dict[int, list[Tag]]:
     """构建背景图层间的包含关系图
     
     Args:
         bg_leaves: 背景图层列表
     
     Returns:
-        字典：key = 背景图层，value = 它包含的其他背景图层
+        字典：key = ``id(背景图层)``，value = 它包含的其他背景图层。
+        key 不用 Tag 本身：bs4 的 ``Tag.__hash__`` 会对整棵子树序列化取哈希，
+        既慢又在属性变化后不稳定。
     """
-    graph: dict[Tag, list[Tag]] = {}
+    graph: dict[int, list[Tag]] = {}
     
     for bg in bg_leaves:
         contained = []
@@ -28,7 +29,7 @@ def build_bg_containment_graph(bg_leaves: list[Tag]) -> dict[Tag, list[Tag]]:
             if is_completely_contained(other_bbox, bg_bbox):
                 contained.append(other_bg)
         
-        graph[bg] = contained
+        graph[id(bg)] = contained
     
     return graph
 
@@ -82,14 +83,12 @@ def order_bg_by_hierarchy(bg_leaves: list[Tag]) -> list[Tag]:
     
     # 计算每个背景的"包含深度"
     # 深度 = 有多少个其他背景包含它
-    depth_map = {}
-    
-    for bg in bg_leaves:
-        depth = 0
-        for other_bg, contained in graph.items():
-            if bg in contained:
-                depth += 1
-        depth_map[bg] = depth
+    depth_map: dict[int, int] = {}
+
+    for contained in graph.values():
+        for bg in contained:
+            key = id(bg)
+            depth_map[key] = depth_map.get(key, 0) + 1
     
     # 按深度升序排列（外层优先）
-    return sorted(bg_leaves, key=lambda b: depth_map[b])
+    return sorted(bg_leaves, key=lambda b: depth_map.get(id(b), 0))

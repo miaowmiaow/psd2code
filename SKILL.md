@@ -42,6 +42,7 @@ python3 psd_to_code.py /path/to/file.psd --target vue
 
 - `--target {html,react,vue}`：产物类型（默认 `html`）
 - `--css-style {compact,expanded}`：优化版 CSS 风格（默认 `compact`）
+- `--strict`：优化器任一步失败即报错（默认容错跳过），CI 建议开启
 - `--no-css-pretty`：关闭 CSS 美化，使用机械渲染
 - `--no-smart-merge`：关闭多 url 背景内联合成（便于 1:1 排查）
 - `--enable-image-layer-flatten`：启用 ImageLayerFlatten（默认关闭）

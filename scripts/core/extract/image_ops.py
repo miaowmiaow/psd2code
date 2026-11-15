@@ -12,6 +12,10 @@ from PIL import Image
 
 from common.image_utils import ImageArrayUtils
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _constrain_bbox_to_canvas(
     bbox: tuple[int, int, int, int],
@@ -87,7 +91,7 @@ def _apply_layer_mask(layer: Any, img: Image.Image, img_bbox: tuple) -> Image.Im
         return ImageArrayUtils.float_array_to_pil(img_arr)
 
     except Exception as e:
-        print(f"    ⚠️  应用图层蒙版失败: {e}")
+        logger.warning(f"    ⚠️  应用图层蒙版失败: {e}")
         return img
 
 

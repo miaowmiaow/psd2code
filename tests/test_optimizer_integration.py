@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from targets.html.postprocess.layout_optimizer.optimizer import (
     LayoutOptimizer,

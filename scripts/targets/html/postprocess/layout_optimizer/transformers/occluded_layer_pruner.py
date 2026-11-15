@@ -125,6 +125,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 _URL_RE = re.compile(
     r"""url\(\s*(?:"([^"]+)"|'([^']+)'|([^)]+?))\s*\)"""
@@ -304,7 +308,7 @@ class OccludedLayerPruner:
         if canvas is None:
             return
 
-        print("\n👻 被完全遮挡图层剔除（pre-optimize）...")
+        logger.info("\n👻 被完全遮挡图层剔除（pre-optimize）...")
 
         # 画布尺寸（路径 C 需要）：从 #canvas CSS 规则读取
         canvas_rule = self.css_rules.get('#canvas', {}) or {}
@@ -403,12 +407,12 @@ class OccludedLayerPruner:
 
             for rec, reason in pruned:
                 png_name = rec.bg_path.name if rec.bg_path else '?'
-                print(
+                logger.info(
                     f"   🗑️  剔除 {rec.css_class:30s} "
                     f"({rec.width}x{rec.height} z={rec.z_index} "
                     f"{png_name})  原因: {reason}"
                 )
-            print(
+            logger.info(
                 f"   合计: 剔除 {len(pruned)} 个图层 "
                 f"(节省 {bytes_saved / 1024:.1f} KB)"
             )
@@ -494,7 +498,7 @@ class OccludedLayerPruner:
         # 裁剪过程中"等待引用归 0 时删除"的旧 PNG 路径 → 原始体积
         pending_delete: Dict[Path, int] = {}
 
-        print("\n✂️  PNG 透明边紧致裁剪...")
+        logger.info("\n✂️  PNG 透明边紧致裁剪...")
 
         for X in candidates:
             rule = self.css_rules.get(X.selector)
@@ -586,7 +590,7 @@ class OccludedLayerPruner:
                         cropped = img.crop((x1, y1, x2, y2))
                         cropped.save(new_path, optimize=True)
                     except Exception as e:
-                        print(f"   ⚠️  裁剪失败 {X.bg_path.name}: {e}")
+                        logger.warning(f"   ⚠️  裁剪失败 {X.bg_path.name}: {e}")
                         continue
                 trim_cache[cache_key] = new_path
                 try:
@@ -621,7 +625,7 @@ class OccludedLayerPruner:
             if X.bg_path not in pending_delete:
                 pending_delete[X.bg_path] = orig_size
 
-            print(
+            logger.info(
                 f"   ✂️  裁剪 {X.css_class:30s} "
                 f"{png_w}x{png_h} → {bw}x{bh} "
                 f"(浪费 {100*waste_ratio:.0f}%, "
@@ -642,13 +646,13 @@ class OccludedLayerPruner:
         if trimmed_n > 0:
             self.stats['trimmed_layers'] += trimmed_n
             self.stats['trimmed_bytes_saved'] += trimmed_bytes_saved
-            print(
+            logger.info(
                 f"   合计: 裁剪 {trimmed_n} 个图层, "
                 f"删除旧 PNG {deleted_n} 个 "
                 f"(净节省 {trimmed_bytes_saved / 1024:.1f} KB)"
             )
         else:
-            print("   无可裁剪图层")
+            logger.info("   无可裁剪图层")
 
         return affected_parents
 
@@ -879,7 +883,7 @@ class OccludedLayerPruner:
                 and (1.0 - new_w_int * new_h_int / (old_w_int * old_h_int) >= 0.1)
             )
             if sig_offset or sig_resize:
-                print(
+                logger.info(
                     f"   📐 收缩父容器 {selector:30s} "
                     f"{old_w_int}x{old_h_int}@({int(round(p_left))},{int(round(p_top))}) "
                     f"→ {new_w_int}x{new_h_int}@"
@@ -889,7 +893,7 @@ class OccludedLayerPruner:
         self.stats['occluded_parent_shrunk_count'] += shrunk_n
         self.stats['occluded_parent_shrunk_pixels'] += shrunk_px
         if shrunk_n > 0:
-            print(
+            logger.info(
                 f"   合计: 收缩 {shrunk_n} 个父容器 envelope "
                 f"(共节省 {shrunk_px / 1000:.1f} kpx²)"
             )
@@ -1217,6 +1221,7 @@ def prune_index_html(
     css_rules: Dict[str, Dict[str, str]],
     html_dir: Path,
     config: Optional[OccludedPrunerConfig] = None,
+    soup: Optional[Any] = None,
 ) -> Tuple[str, Dict[str, Dict[str, str]], Dict[str, Any]]:
     """对未优化的 index.html / style.css 做"被遮挡图层剔除"。
 
@@ -1225,14 +1230,16 @@ def prune_index_html(
         css_rules: parse_css_to_dict 解析的 CSS 规则字典
         html_dir: index.html 所在目录（用于解析 url("images/xxx.png") 相对路径）
         config: OccludedPrunerConfig；None 用默认
+        soup: 可选，已解析的 BeautifulSoup 文档；传入时跳过解析并原地修改
 
     Returns:
         (剔除后 HTML 字符串, 剔除后 css_rules, stats)
         stats 含 ``occluded_layers_pruned`` / ``occluded_bytes_saved``
     """
-    from bs4 import BeautifulSoup
+    if soup is None:
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html_content, 'html.parser')
+        soup = BeautifulSoup(html_content, 'html.parser')
     stats: Dict[str, Any] = {}
     pruner = OccludedLayerPruner(
         soup=soup,

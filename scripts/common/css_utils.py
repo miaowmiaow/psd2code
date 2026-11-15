@@ -5,7 +5,7 @@ CSS 工具函数：CSS 字符串 ↔ 字典的双向转换
 """
 
 import re
-from typing import Dict, Tuple
+from typing import Dict
 
 
 # 识别为"按类/ID 解析"的选择器前缀：仅 `.foo` / `#foo` 形式

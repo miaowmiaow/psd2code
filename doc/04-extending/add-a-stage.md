@@ -53,15 +53,20 @@ class AccessibilityStage(Stage):
 ```python
 from targets.html.postprocess.accessibility import AccessibilityStage
 
-def build_html_pipeline(ctx: PipelineContext) -> Pipeline:
-    return Pipeline([
-        LoadPsdStage(),
+def build_html_prefix_stages(subdir_name: str | None = None) -> list[Stage]:
+    return [
+        LoadPsdStage(subdir_name=subdir_name),
         ParseToIrStage(),
         HtmlCodegenStage(),
+        BgNestingRestructureStage(),
+        PrunePreOptimizeStage(),
         LayoutOptimizeStage(),
-        AccessibilityStage(),           # ←★ 新增
-    ])
+        AccessibilityStage(),           # ←★ 新增（若对所有 target 生效，就加在这里）
+    ]
 ```
+
+> 只在 HTML 交付物里加、不要影响 React / Vue 时，请改
+> `HtmlTarget.build_pipeline()`，而不是共享前缀链。
 
 ### 3. 更新 artifact key 表
 

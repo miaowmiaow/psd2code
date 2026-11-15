@@ -170,7 +170,9 @@ def to_legacy_layers(doc: Document) -> list[dict]:
 |-------|------|------|
 | **IR 字段补全** | `ir_enricher.py` | 从 legacy 提取关键字段 |
 | **TypedIRCache** | `typed_ir_cache.py` | O(1) IR 节点查询 (-2-3%) |
-| **DeltaIR 增量** | `delta_ir.py` | 检测变化节点 (-2-3%) |
-| **StreamingIterator** | `streaming_iterator.py` | 流式迭代器 (-87% 内存) |
+
+> `delta_ir.py`（增量追踪）与 `streaming_iterator.py`（流式迭代）曾作为实验
+> 模块存在，但未被任何 Stage 使用，已于 2026-11 删除；如需引入请先明确消费方
+> 与性能目标，避免再次沉淀为死代码。
 
 详见 [Performance-Optimization.md](./Performance-Optimization.md)。

@@ -8,7 +8,6 @@
 import pytest
 from PIL import Image
 import numpy as np
-from unittest.mock import Mock, MagicMock, patch
 import sys
 from pathlib import Path
 

@@ -149,6 +149,16 @@ class Config:
     CROP_OVERFLOW_IMAGES: bool = True
 ```
 
+`OUTPUT_BASE_DIR` 的推导（`config.py::_resolve_output_base`）：
+
+| 运行形态 | 结果 |
+| -------- | ---- |
+| 源码 / `pip install -e .` | `<repo>/output`（历史行为，不变） |
+| wheel 安装（`__file__` 位于 `site-packages`） | `<cwd>/output` |
+
+后者是为了避免把产物写进 Python 安装目录（既可能不可写，也会污染环境）。
+`--output` 显式传参时以参数为准。
+
 **何时改：**
 
 - `OUTPUT_BASE_DIR`：改默认输出位置

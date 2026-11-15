@@ -34,6 +34,11 @@ jobs:
         run: |
           python -m compileall -q scripts psd_to_code.py
 
+      - name: Lint (ruff)
+        run: |
+          ruff check .
+
       - name: Run tests
         run: |
-          pytest -q --maxfail=5
+          # 不加 --maxfail：一次看到所有失败，避免「修一个冒一个」
+          pytest -q

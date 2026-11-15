@@ -141,25 +141,15 @@ class JsonTraceHook(PipelineHook):
 - 插入新 Stage：见 [`../04-extending/add-a-stage.md`](../04-extending/add-a-stage.md)
 - 新增 Hook：直接子类化 `PipelineHook`，在入口赋值即可。
 
-## 高级：并行管线
+## 关于并行管线（已移除）
 
-第5周新增 `core/pipeline_parallel.py`，支持多 target 并行导出：
+早期实验过 `core/pipeline_parallel.py`（`ParallelPipeline` / `StageDepGraph` /
+`ThreadSafeContext`），但**从未接入主流程**，且与现状冲突：
 
-```python
-from core.pipeline_parallel import ParallelPipeline
+- 解析阶段存在模块级全局可变状态（`_LEGACY_ID_COUNTER`、图片计数器、
+  文件名 registry、语义命名 resolver 单例），并行执行会互相污染；
+- 多 target 的实际复用的是**同一条 HTML 前缀链**（`build_html_prefix_stages`），
+  不是并行跑多份 pipeline。
 
-pipeline = ParallelPipeline(
-    stages=[parse_stage, html_stage, react_stage, vue_stage],
-    enable_parallel=True,
-    max_workers=3
-)
-ctx = PipelineContext(psd_path=...)
-result = pipeline.run(ctx)  # 自动按依赖分组，并行执行
-```
-
-**特点**：
-- 自动依赖分析：从 ctx.artifacts 推断 Stage 间依赖
-- 线程安全：RLock 保护共享状态
-- 性能预期：+2-3% (HTML + React + Vue 并行)
-
-详见 [Performance-Optimization.md](./Performance-Optimization.md)。
+因此该模块及其测试已于 2026-11 删除。若将来要做真并行，前置条件是先把
+`core/psd`、`core/extract` 里的全局状态改成显式传参或 `threading.local()`。

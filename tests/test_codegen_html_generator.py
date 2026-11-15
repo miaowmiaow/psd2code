@@ -4,10 +4,9 @@
 import json
 from pathlib import Path
 
-import pytest
 
 from targets.html.codegen.context import CodegenContext
-from targets.html.codegen.html_builder import HtmlBuilder, HtmlBuilderMixin
+from targets.html.codegen.html_builder import HtmlBuilder
 from targets.html.codegen.html_generator import HTMLGenerator
 from targets.html.codegen.version import __version__
 
@@ -73,10 +72,27 @@ class TestHtmlBuilder:
         css = self.builder.build_css()
         assert ".btn__1 { color: red; }" in css
 
-    def test_build_css_media_query(self):
+    def test_build_css_has_no_invalid_scale_calc(self):
+        """回归：`scale(calc(100vw / W))` 的 calc 结果是长度，浏览器整条丢弃。
+
+        缩放改由 main.js 的 fitCanvas() 负责，CSS 里不应再出现该写法。
+        """
         css = self.builder.build_css()
-        assert f"max-width: 750px" in css
-        assert f"calc(100vw / 750)" in css
+        assert "scale(calc(" not in css
+        assert "max-width" not in css
+        assert "fitCanvas" in css  # 留一条指向实现的注释，避免后人又把 CSS 加回来
+
+    def test_build_css_scales_from_top_left(self):
+        """回归：窄屏缩放的锚点必须是左上角。
+
+        #canvas 宽于视口时 ``margin: 0 auto`` 会退化为 0、盒子本身不居中；
+        若锚点用 top center，缩放后内容整体右移（偏移 = 宽/2 × (1-scale)），
+        表现为左侧一大块空白、右侧被裁掉。裁切与视觉高度由 #canvas-wrap 承担。
+        """
+        css = self.builder.build_css()
+        assert "transform-origin: top left;" in css
+        assert "transform-origin: top center;" not in css
+        assert "#canvas-wrap" in css
 
     def test_build_html_structure(self):
         html = self.builder.build_html("<div>content</div>\n")
@@ -85,6 +101,7 @@ class TestHtmlBuilder:
         assert "<title>landing</title>" in html
         assert 'href="style.css"' in html
         assert 'id="canvas"' in html
+        assert 'id="canvas-wrap"' in html
         assert "<div>content</div>" in html
         assert 'src="main.js"' in html
 
@@ -93,6 +110,19 @@ class TestHtmlBuilder:
         assert f"PSD2HTML v{__version__}" in js
         assert "setLanguage" in js
         assert "data-i18n-key" in js
+
+    def test_build_js_injects_responsive_fit(self):
+        js = self.builder.build_js()
+        assert "fitCanvas" in js
+        assert "DESIGN_WIDTH = 750" in js
+        assert "DESIGN_HEIGHT = 1334" in js
+        assert "Math.min(1" in js
+        # 补偿高度写在 #canvas-wrap 上（transform 不改变布局尺寸）
+        assert "wrap.style.height = Math.round(DESIGN_HEIGHT * scale)" in js
+        # 不缩放时必须清空补偿高度，否则回到宽屏会残留
+        assert "wrap.style.height = ''" in js
+        # 不再改 body.height：body 高度由视口容器自然撑开
+        assert "document.body.style.height" not in js
 
 
 # =====================================================================
@@ -118,7 +148,7 @@ class TestHTMLGeneratorGenerate:
                 "image_path": "images/bg.png",
             },
         ]
-        html_path = gen.generate_html(layers)
+        gen.generate_html(layers)
 
         # Files should exist
         assert (tmp_path / "index.html").exists()

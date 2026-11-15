@@ -51,15 +51,25 @@ Facade 内部按固定顺序尝试：
 上游（`LayerExporter`）拿到扩展 bbox 后，存在 legacy dict 的 `left/top/width/height`，
 HTML 生成器就会据此定位元素。
 
-## 效果渲染器的基类
+## 效果渲染器的接口约定
 
-位置：`core/render/effects/effect_base.py`
+> 历史设计过 `core/render/effects/effect_base.py`（`EffectRenderer` 抽象基类），
+> 但所有 renderer 最终都写成独立类 + 静态方法，基类从未被采用，已于 2026-11 删除。
+
+实际约定（看任一 `*_renderer.py` 即可）：
 
 ```python
-class EffectRenderer(ABC):
-    def can_render(self, layer) -> bool: ...
-    def compute_expand(self, effect) -> int: ...
-    def render(self, canvas_arr, layer, effect, offset) -> np.ndarray: ...
+class XxxRenderer:
+    @staticmethod
+    def can_render(effect) -> bool:          # 类型判定，Facade 的 if/elif 链使用
+        return str(effect) == 'Xxx'
+
+    @staticmethod
+    def render(effect, layer, alpha, h, w) -> np.ndarray | None:
+        ...                                   # 在 h×w 画布上叠加，返回新数组
+```
+
+画布是否扩展由 Facade 统一决定，renderer 只负责"在给定画布上叠加像素"。
 ```
 
 通用工具（alpha 通道抽取、距离场等）也在这里。

@@ -2,11 +2,8 @@
 """Tests for targets/html/codegen/renderers/ — Registry, css_helpers, and Renderers."""
 
 import struct
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from targets.html.codegen.renderers.base import (
     NodeRenderer,
@@ -182,7 +179,7 @@ class TestReadPngSize:
 # GroupRenderer — _calculate_actual_bounds
 # =====================================================================
 
-from targets.html.codegen.renderers.group_renderer import _calculate_actual_bounds
+from targets.html.codegen.renderers.group_renderer import _calculate_actual_bounds  # noqa: E402 - 按测试分区分段导入
 
 
 class TestCalculateActualBounds:
@@ -198,11 +195,11 @@ class TestCalculateActualBounds:
         assert _calculate_actual_bounds(layer) == (0, 0)
 
     def test_group_children_within_bounds(self):
-        """Children within parent, but max_right == width → triggers +2 safety margin.
+        """子层完全内缩 → 返回 bbox，不加保护边距。
 
-        _calculate_actual_bounds initialises max_right = original_width, so the
-        condition `max_right >= original_width - 1` is always true for non-empty
-        groups with width >= 1.  This is intentional: provide a small safety buffer.
+        历史行为：`max_right` 从 bbox 起步，导致 `max_right >= width - 1` 恒真，
+        于是**每个**有子层的组都被无条件 +2px（容器比 PSD bbox 大 2px）。
+        2026-11 改为以子层实际边界起步：内缩不加、贴边/溢出才加。
         """
         layer = {
             "type": "group", "width": 200, "height": 200,
@@ -210,11 +207,11 @@ class TestCalculateActualBounds:
                 {"type": "image", "left": 10, "top": 10, "width": 50, "height": 50},
             ],
         }
-        # max_right=200 >= 199 → expand to 202
-        assert _calculate_actual_bounds(layer) == (202, 202)
+        # 子层边界 60×60，远未触及 200 → 保持 bbox
+        assert _calculate_actual_bounds(layer) == (200, 200)
 
     def test_group_children_near_edge(self):
-        """Child right edge >= parent_width - 1 → expand with +2 safety."""
+        """只有宽度方向贴边 → 只扩展宽度，高度保持 bbox（分轴判断）。"""
         layer = {
             "type": "group", "width": 100, "height": 100,
             "children": [
@@ -222,9 +219,9 @@ class TestCalculateActualBounds:
             ],
         }
         w, h = _calculate_actual_bounds(layer)
-        # child_right=100 >= width-1=99 → expand
+        # child_right=100 >= 99 → 102；child_bottom=50 未贴边 → 保持 100
         assert w == 102
-        assert h == 102
+        assert h == 100
 
     def test_group_children_overflow(self):
         """Child extends beyond parent → expanded bounds."""
@@ -250,9 +247,9 @@ class TestCalculateActualBounds:
             ],
         }
         w, h = _calculate_actual_bounds(layer)
-        # Empty child ignored; but max_right=200 >= 199 → +2 safety
-        assert w == 202
-        assert h == 202
+        # 空残留子组被忽略；剩余子层 60×60 内缩 → 保持 bbox
+        assert w == 200
+        assert h == 200
 
     def test_nested_group_bounds(self):
         """Recursive: inner group's children contribute to outer bounds."""
@@ -270,17 +267,16 @@ class TestCalculateActualBounds:
             ],
         }
         w, h = _calculate_actual_bounds(layer)
-        # Inner group: child_right=80 >= 79 → expand to 82
-        # Outer: max_right = max(100, 0+82) = 100 >= 99 → expand to 102
-        assert w == 102
-        assert h == 102
+        # 内层：子层 80 贴边 → 82；外层：子组右边界 82 < 99 → 保持 bbox 100
+        assert w == 100
+        assert h == 100
 
 
 # =====================================================================
 # TextRenderer helpers
 # =====================================================================
 
-from targets.html.codegen.renderers.text_renderer import _fmt_num, _text_style_css
+from targets.html.codegen.renderers.text_renderer import _fmt_num, _text_style_css  # noqa: E402 - 按测试分区分段导入
 
 
 class TestFmtNum:
@@ -389,8 +385,8 @@ class TestTextStyleCss:
 # GroupRenderer.render (integration-level, with minimal context)
 # =====================================================================
 
-from targets.html.codegen.context import CodegenContext
-from targets.html.codegen.layer_renderer import LayerRenderer
+from targets.html.codegen.context import CodegenContext  # noqa: E402 - 按测试分区分段导入
+from targets.html.codegen.layer_renderer import LayerRenderer  # noqa: E402 - 按测试分区分段导入
 
 
 class TestGroupRendererIntegration:
@@ -438,6 +434,41 @@ class TestGroupRendererIntegration:
         # 2 CSS rules: group + image
         assert len(self.ctx.css_rules) == 2
 
+    def test_group_bleed_padding_only_when_child_touches_edge(self):
+        """子层贴满组 bbox 时容器多出 2px 保护边距；没贴边则保持 bbox。
+
+        `_GROUP_BLEED_PADDING` 是抗锯齿保护（非效果扩展），它会让组容器的 CSS
+        尺寸比 PSD bbox 大 2px —— 这是 `_mapping_report.md` 里"尺寸对不上"的
+        来源，此用例把它固定住，避免被误当成 bug 随手改掉。
+        """
+        def render(width: int, height: int, child_w: int, child_h: int) -> str:
+            self.ctx.css_rules.clear()
+            layer = {
+                "id": "group-1", "name": "card", "type": "group",
+                "left": 0, "top": 0, "width": width, "height": height,
+                "opacity": 1, "blend_mode": "normal", "z_index": 1,
+                "children": [{
+                    "id": "layer-1", "name": "bg", "type": "image",
+                    "left": 0, "top": 0, "width": child_w, "height": child_h,
+                    "opacity": 1, "blend_mode": "normal", "z_index": 2,
+                }],
+            }
+            self.renderer.render(layer, indent=2)
+            return self.ctx.css_rules[0]
+
+        # 贴边 → +2
+        touching = render(200, 200, 200, 200)
+        assert "width: 202px;" in touching
+        assert "height: 202px;" in touching
+        # 不贴边（子层只占一半）→ 保持 bbox，且仍然裁剪
+        inside = render(200, 200, 100, 100)
+        assert "width: 200px;" in inside
+        assert "overflow: hidden;" in inside
+        # 溢出（子层比组大）→ 也按实际尺寸 +2，且不裁剪
+        overflowing = render(200, 200, 260, 220)
+        assert "width: 262px;" in overflowing
+        assert "overflow: hidden;" not in overflowing
+
 
 # =====================================================================
 # ImageRenderer.render (integration-level)
@@ -474,7 +505,7 @@ class TestImageRendererIntegration:
             "left": 10, "top": 10, "width": 50, "height": 50,
             "opacity": 0.5, "blend_mode": "normal", "z_index": 2,
         }
-        html = self.renderer.render(layer, indent=2)
+        self.renderer.render(layer, indent=2)
         css = self.ctx.css_rules[0]
         assert "background-image" not in css
 
@@ -583,7 +614,7 @@ class TestTextRendererIntegration:
             "opacity": 1, "blend_mode": "normal", "z_index": 1,
             "text": "hello",
         }
-        html = self.renderer.render(layer, indent=2)
+        self.renderer.render(layer, indent=2)
         css = self.ctx.css_rules[0]
         assert "font-size:" not in css
 

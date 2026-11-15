@@ -9,7 +9,6 @@ from core.ir import (
     GroupNode,
     ImageNode,
     TextNode,
-    Node,
     Style,
     BBox,
     Color,

@@ -10,7 +10,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
 
 from core.ir.adapters import to_legacy_layers, _legacy_from_node
 from core.ir.styles import BBox, Style

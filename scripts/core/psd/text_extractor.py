@@ -9,6 +9,10 @@
 
 from typing import Any
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class TextExtractor:
     """文本提取器（静态工具类）"""
@@ -29,7 +33,7 @@ class TextExtractor:
         if hasattr(layer, 'transform'):
             t = layer.transform
             if t and len(t) >= 4:
-                a, b, c, d = t[0], t[1], t[2], t[3]
+                b, c = t[1], t[2]
                 if abs(b) > 0.01 or abs(c) > 0.01:
                     return True
         return False
@@ -200,5 +204,5 @@ class TextExtractor:
             return {'text': text, 'style': style}
 
         except Exception as e:
-            print(f"    ⚠️  文本提取失败: {e}")
+            logger.warning(f"    ⚠️  文本提取失败: {e}")
             return None

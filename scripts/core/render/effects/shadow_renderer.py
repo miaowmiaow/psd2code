@@ -12,6 +12,10 @@ from PIL import Image, ImageFilter
 
 from common.image_utils import ImageArrayUtils
 
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class ShadowRenderer:
     """阴影效果渲染器基类"""
@@ -117,7 +121,7 @@ class DropShadowRenderer(ShadowRenderer):
             return out
             
         except Exception as e:
-            print(f"      ⚠️  投影渲染失败: {e}")
+            logger.warning(f"      ⚠️  投影渲染失败: {e}")
             return None
     
     @staticmethod
@@ -205,5 +209,5 @@ class InnerShadowRenderer(ShadowRenderer):
             return out
             
         except Exception as e:
-            print(f"      ⚠️  内阴影渲染失败: {e}")
+            logger.warning(f"      ⚠️  内阴影渲染失败: {e}")
             return None

@@ -1,7 +1,7 @@
 """主优化器协调类"""
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from .transformers.dom_restructure import DOMRestructure
@@ -27,7 +27,14 @@ from .transformers.virtual_wrapper_rename import (
     VirtualWrapperRenameConfig,
 )
 from .transformers.wrapper_collapse import WrapperCollapse
-from .transformers.css_post_clean import CssPostClean, CssPostCleanConfig
+from .transformers.css_post_clean import CssPostClean
+from .transformers.background_layer_absorber_v2 import (
+    absorb_background_layers_in_soup,
+)
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class LayoutOptimizer:
@@ -54,6 +61,9 @@ class LayoutOptimizer:
         3.5 重复元素抽取：把 ≥3 个等价 hash 类合并为单一语义类（HTML 复用）
         3.7 语义类去后缀：``.nickname__37`` → ``.nickname``（同名冲突用 -2/-3）
         3.8 虚拟 wrapper 命名：``.v-stack-7`` → ``.<语义>-stack``
+        2.9 背景层吸收：容器内"大底图 + 浮层"的底图吸收为容器 background-image
+                           （必须在 CssDedup 之前——它依赖 z-index 判断前后景）
+        3.9 结构感知 CSS 后处理清理（CssPostClean）
         4. CSS 美化：按 DOM 顺序排序 + 属性分段 + 合并组多行（CssPretty）
     """
 
@@ -70,6 +80,7 @@ class LayoutOptimizer:
         images_dir: Optional[Path] = None,
         flatten_config: Optional[FlattenConfig] = None,
         strict: bool = False,
+        soup: Optional[Any] = None,
     ):
         """
         Args:
@@ -93,8 +104,10 @@ class LayoutOptimizer:
             strict: 严格模式。为 True 时，任何 transformer 步骤失败都会
                 直接抛出异常（适用于 CI / debug）。为 False（默认）时保持
                 "尽力而为"容错——失败步骤记录到 ``stats['_failures']`` 并跳过。
+            soup: 可选，已解析的 BeautifulSoup 文档；传入时直接在其上原地优化，
+                跳过 HTML 解析（供 pipeline 跨 Stage 复用 DOM）。
         """
-        self.soup = BeautifulSoup(html_content, 'html.parser')
+        self.soup = soup if soup is not None else BeautifulSoup(html_content, 'html.parser')
         self.css_rules = css_rules
         self.global_header = global_header
         self.strict = strict
@@ -176,9 +189,26 @@ class LayoutOptimizer:
                 'step': step_name,
                 'error': str(e),
             })
-            print(f"⚠️  {step_name}失败: {e}")
+            logger.warning(f"⚠️  {step_name}失败: {e}")
             import traceback
             traceback.print_exc()
+
+    # ------------------------------------------------------------------
+    # Internal: 背景层吸收（原地替换 soup）
+    # ------------------------------------------------------------------
+
+    def _absorb_background_layers(self) -> None:
+        """把"大底图 + 多个浮层"容器里的背景 leaf 吸收为容器 background-image。
+
+        直接在当前 DOM 上执行，避免 HTML 序列化和重新解析；同时保持各 transformer
+        持有的 soup 引用有效。
+        """
+        _, bg_stats = absorb_background_layers_in_soup(self.soup, self.css_rules)
+        self.stats["bg_absorption"] = bg_stats
+        if not bg_stats.get("bg_layers_absorbed"):
+            return
+        self.stats["bg_layers_absorbed"] = bg_stats["bg_layers_absorbed"]
+        self.stats["bg_elements_removed"] = bg_stats.get("bg_elements_removed", 0)
 
     def optimize(self) -> Tuple[str, Dict[str, Dict[str, str]], Dict]:
         """
@@ -191,7 +221,7 @@ class LayoutOptimizer:
             - 美化后的 CSS 字符串放在 ``stats['_pretty_css']``，调用方应优先
               用它写盘；为空（CssPretty 未开启或失败）则降级到 dict_to_css。
         """
-        print("\n🎨 开始布局优化...")
+        logger.info("\n🎨 开始布局优化...")
 
         # 步骤 1：DOM 重构（根据包含关系调整父子结构）
         self._run_step("DOM 重构", self.dom_restructure.restructure_dom)
@@ -222,6 +252,17 @@ class LayoutOptimizer:
 
         # 步骤 2.7（已迁移）：被完全遮挡图层剔除已迁移到 LayoutOptimizer
         # 之前的独立 Stage（PrunePreOptimizeStage）。
+
+        # 步骤 2.9：背景层吸收（V2 安全版）
+        # ⚠️ 必须在 css_dedup **之前**：本 pass 用子元素的 z-index 判断前后景，
+        # 而 CssDedup 会精简掉"与 DOM 顺序一致"的 z-index（实测：底图 z=1 /
+        # 文字 z=2 的容器跑完 dedup 后两个 z-index 都被删）→ 吸收条件退化为
+        # min_z == max_z 直接 early-return，整个 pass 变成死代码。
+        # 放在这里还有一个好处：吸收写入的容器 background 会继续被 CssDedup
+        # 归一成 shorthand、被 CssPretty 排版，产物更一致。
+        # 该步骤原为独立 Stage（BackgroundLayerAbsorptionStage），只有 HTML
+        # target 挂载，导致 React / Vue 产物缺少这一步优化；收进优化链后三端一致。
+        self._run_step("背景层吸收", self._absorb_background_layers)
 
         # 步骤 3：CSS 去冗余（z-index 精简 + 等价规则合并）
         # 必须在所有 DOM/CSS 调整之后运行，保证看到的是最终态。
@@ -288,7 +329,7 @@ class LayoutOptimizer:
                     'step': 'CSS 美化',
                     'error': str(e),
                 })
-                print(f"⚠️  CSS 美化失败（降级到 dict_to_css）: {e}")
+                logger.warning(f"⚠️  CSS 美化失败（降级到 dict_to_css）: {e}")
                 import traceback
                 traceback.print_exc()
                 pretty_css = ""
@@ -299,51 +340,56 @@ class LayoutOptimizer:
         # ------------------------------------------------------------------
         # 统计摘要
         # ------------------------------------------------------------------
-        print(f"\n✅ 优化完成！")
-        print(f"   - DOM 重构: {self.stats['dom_restructured']} 个")
-        print(f"   - v-list 创建: {self.stats['sibling_lists_created']} 个 "
+        logger.info("\n✅ 优化完成！")
+        logger.info(f"   - DOM 重构: {self.stats['dom_restructured']} 个")
+        logger.info(f"   - v-list 创建: {self.stats['sibling_lists_created']} 个 "
               f"(包裹 {self.stats['sibling_items_wrapped']} 个节点)")
-        print(f"   - 应用 flex: {self.stats['flex_applied']} 个")
+        logger.info(f"   - 应用 flex: {self.stats['flex_applied']} 个")
         if self.stats.get('wrappers_collapsed'):
-            print(f"   - 单子 wrapper 折叠: {self.stats['wrappers_collapsed']} 个")
-        print(f"   - z-index 精简: {self.stats['z_index_pruned']} 处")
+            logger.info(f"   - 单子 wrapper 折叠: {self.stats['wrappers_collapsed']} 个")
+        logger.info(f"   - z-index 精简: {self.stats['z_index_pruned']} 处")
         if self.stats.get('z_index_filled'):
-            print(f"   - z-index 兜底补全 (混合状态): {self.stats['z_index_filled']} 处")
-        print(f"   - CSS 等价规则合并: 节省 {self.stats['css_rules_merged']} 条")
+            logger.info(f"   - z-index 兜底补全 (混合状态): {self.stats['z_index_filled']} 处")
+        logger.info(f"   - CSS 等价规则合并: 节省 {self.stats['css_rules_merged']} 条")
         if self.stats.get('position_relaxed_groups'):
-            print(
+            logger.info(
                 f"   - 位置噪声归一: {self.stats['position_relaxed_groups']} 组 "
                 f"(覆盖 {self.stats['position_relaxed_classes']} 个类)"
             )
         if self.stats.get('repeat_groups_unified'):
-            print(
+            logger.info(
                 f"   - 重复元素抽取: {self.stats['repeat_groups_unified']} 组 "
                 f"→ 删除 {self.stats['classes_unified']} 个 hash 类、"
                 f"复用到 {self.stats['elements_unified']} 个元素"
             )
         if self.stats.get('virtual_wrapper_renamed'):
-            print(
+            logger.info(
                 f"   - 虚拟 wrapper 命名: 重写 "
                 f"{self.stats['virtual_wrapper_renamed']} 个类名"
             )
         post_triple = self.stats.get('post_clean_flex_triple_removed', 0)
         post_zero_z = self.stats.get('post_clean_zero_z_removed', 0)
         if post_triple or post_zero_z:
-            print(
+            logger.info(
                 f"   - CSS 后处理清理: flex三件套 {post_triple} 属性, "
                 f"z-index:0 {post_zero_z} 条"
             )
+        if self.stats.get("bg_layers_absorbed"):
+            logger.info(
+                f"   - 背景层吸收: 吸收 {self.stats['bg_layers_absorbed']} 个, "
+                f"移除 {self.stats.get('bg_elements_removed', 0)} 个元素"
+            )
         if pretty_css:
-            print(f"   - CSS 美化: 已生成（DOM 序 + 属性分段 + 合并组多行）")
+            logger.info("   - CSS 美化: 已生成（DOM 序 + 属性分段 + 合并组多行）")
         bg_inline = self.stats.get('bg_inline_flatten')
         if bg_inline and bg_inline.get('rules_flattened'):
-            print(
+            logger.info(
                 f"   - 背景内联合成: {bg_inline['rules_flattened']} 规则 "
                 f"(折叠 {bg_inline['layers_collapsed']} 层, "
                 f"节省 {bg_inline['bytes_saved'] / 1024:.1f} KB)"
             )
         if self.stats.get('image_layer_containers_flattened'):
-            print(
+            logger.info(
                 f"   - 图层扁平化: {self.stats['image_layer_containers_flattened']} 个容器 "
                 f"(共合并 {self.stats['image_layer_layers_collapsed']} 层, "
                 f"节省 {self.stats['image_layer_bytes_saved'] / 1024:.1f} KB)"
@@ -353,7 +399,7 @@ class LayoutOptimizer:
         failures = self.stats['_failures']
         if failures:
             names = ", ".join(f['step'] for f in failures)
-            print(f"\n⚠️  {len(failures)} 个 transformer 失败: {names}")
+            logger.warning(f"\n⚠️  {len(failures)} 个 transformer 失败: {names}")
 
         return html_output, self.css_rules, self.stats
 
@@ -370,6 +416,7 @@ def optimize_layout(
     images_dir: Optional[Path] = None,
     flatten_config: Optional[FlattenConfig] = None,
     strict: bool = False,
+    soup: Optional[Any] = None,
 ) -> Tuple[str, Dict[str, Dict[str, str]], Dict]:
     """
     布局优化入口函数
@@ -403,5 +450,6 @@ def optimize_layout(
         images_dir=images_dir,
         flatten_config=flatten_config,
         strict=strict,
+        soup=soup,
     )
     return optimizer.optimize()

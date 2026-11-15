@@ -15,6 +15,18 @@ from ..escape import _esc
 from .base import NodeRenderer, register_renderer
 from .css_helpers import position_css_lines, semantic_css_class
 
+# 组容器「贴边保护边距」：
+# 当子层几乎填满组 bbox 时，组容器会在右下各多出这么多像素，避免子图边缘的
+# 抗锯齿像素被 `overflow: hidden` 裁掉。
+#
+# 注意：
+# - 它**不是**效果扩展（描边/投影扩展已在 LayerExporter 阶段计入子图 bbox，
+#   见 core/extract/layer_exporter.py::_calc_group_expand）；
+# - 因此组容器的 CSS 尺寸可能比 PSD bbox 大 2px，`_mapping_report.md` 里会看到
+#   这一差异（属预期，不是 bug）；
+# - 改动它属于像素级行为变更，需要真实设计稿的 baseline diff 验证。
+_GROUP_BLEED_PADDING = 2
+
 
 def _calculate_actual_bounds(layer_data: dict[str, Any]) -> tuple[int, int]:
     """递归计算图层的实际边界（考虑效果溢出）。
@@ -37,8 +49,11 @@ def _calculate_actual_bounds(layer_data: dict[str, Any]) -> tuple[int, int]:
     if not children and original_width == 0 and original_height == 0:
         return 0, 0
 
-    max_right = original_width
-    max_bottom = original_height
+    # 以「子层实际边界」为基准（0 起步），而不是以 bbox 起步：
+    # 若从 bbox 起步，`max_right >= original_width - 1` 恒成立 → 每个有子层的组
+    # 都会被无条件 +2px，容器尺寸永远比 PSD bbox 大 2px（历史行为）。
+    max_right = 0
+    max_bottom = 0
 
     for child in children:
         # 跳过空残留子组（同上）
@@ -59,10 +74,16 @@ def _calculate_actual_bounds(layer_data: dict[str, Any]) -> tuple[int, int]:
         max_right = max(max_right, child_right)
         max_bottom = max(max_bottom, child_bottom)
 
-    if max_right >= original_width - 1 or max_bottom >= original_height - 1:
-        return max_right + 2, max_bottom + 2
-
-    return original_width, original_height
+    # 分轴判断：只有真正触及/超出该方向边界的轴才加保护边距。
+    # 旧实现用 `or` 合并两轴，且直接返回 max_* + 2 —— 当只有宽度溢出时高度会被
+    # 压成 `子层高度 + 2`（可能远小于 bbox），把容器砍短。
+    width = original_width
+    height = original_height
+    if max_right >= original_width - 1:
+        width = max(original_width, max_right + _GROUP_BLEED_PADDING)
+    if max_bottom >= original_height - 1:
+        height = max(original_height, max_bottom + _GROUP_BLEED_PADDING)
+    return width, height
 
 
 @register_renderer("group")
@@ -91,8 +112,9 @@ class GroupRenderer(NodeRenderer):
         if children:
             min_left = 0
             min_top = 0
-            max_right = width
-            max_bottom = height
+            # 同 _calculate_actual_bounds：从 0 起步才能区分"内缩"与"贴边/溢出"
+            max_right = 0
+            max_bottom = 0
 
             for child in children:
                 # 跳过"空残留 group"：PSD 里被设计师隐藏/清空的子组，
@@ -129,8 +151,11 @@ class GroupRenderer(NodeRenderer):
 
             if actual_width >= width - 1 or actual_height >= height - 1:
                 has_overflow = True
-                width = actual_width + 2
-                height = actual_height + 2
+                # 分轴扩展，且绝不小于 bbox（详见 _calculate_actual_bounds 注释）
+                if actual_width >= width - 1:
+                    width = max(width, actual_width + _GROUP_BLEED_PADDING)
+                if actual_height >= height - 1:
+                    height = max(height, actual_height + _GROUP_BLEED_PADDING)
 
         # ── 2. 组 CSS ──
         # class_name 是多类字符串（如 "btn__27 layer-group"），CSS 选择器只取语义类
@@ -142,8 +167,8 @@ class GroupRenderer(NodeRenderer):
             include_blend=False,
         )
         if not has_overflow:
-            css += f'    overflow: hidden;  /* 裁剪超出组边界的子图层 */\n'
-        css += f'}}'
+            css += '    overflow: hidden;  /* 裁剪超出组边界的子图层 */\n'
+        css += '}'
         self.ctx.css_rules.append(css)
 
         # ── 3. 递归渲染所有子层 ──

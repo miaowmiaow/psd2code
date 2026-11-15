@@ -16,7 +16,6 @@ LayoutOptimizer (targets/html/postprocess/layout_optimizer) 接管。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 from pathlib import Path
 from PIL import Image
@@ -35,19 +34,26 @@ from core.render.effects.effects_renderer import (
 )
 from psd_tools.constants import BlendMode as _BlendMode  # type: ignore[import-untyped]
 from .image_ops import (
-    _constrain_bbox_to_canvas,
     _apply_layer_mask,
     _alpha_composite_numpy,
     _blend_composite_numpy,
 )
 from .handlers import HandlerContext, run_handlers
-from .light_effect_renderer import LightEffectRenderer, _LIGHT_BLEND_MODES
+from .light_effect_renderer import (
+    LightEffectLayerInfo,
+    LightEffectRenderer,
+    _LIGHT_BLEND_MODES,
+)
 from .clipping_handler import ClippingHandler
 from .exporter_context import LayerExporterContext
 
 # 注册 psd-tools 缺失的调整层补丁（如 BlackAndWhite）
 # 必须在任何 composite() 调用之前导入
 import core.render.adjustments_patch  # noqa: F401
+
+from common.log_config import get_logger
+
+logger = get_logger(__name__)
 
 # ── 光效层穿透渲染 ─────────────────────────────────────────────────
 #
@@ -185,7 +191,7 @@ class LayerExporter:
         if md5 in self._image_hash_map:
             existing_path = self._image_hash_map[md5]
             self._dedup_count += 1
-            print(f"{'  ' * depth}♻️  {name} (复用 {existing_path})")
+            logger.info(f"{'  ' * depth}♻️  {name} (复用 {existing_path})")
             return existing_path
 
         # 新图片，保存到磁盘
@@ -312,7 +318,7 @@ class LayerExporter:
             base_name = base_layer.name or 'merged'
             clipped_names = [c.name for c in clipped_layers]
             full_name = f'{parent_name}/{base_name}' if parent_name else base_name
-            print(f"{'  ' * depth}🔗 合并剪切蒙版: {base_name} ← {clipped_names}")
+            logger.info(f"{'  ' * depth}🔗 合并剪切蒙版: {base_name} ← {clipped_names}")
 
             # --- 步骤1: 获取 base 原始图层（不含效果）---
             base_raw_img = base_layer.topil()
@@ -422,7 +428,7 @@ class LayerExporter:
                     canvas_raw[dst_y0:dst_y0+copy_h, dst_x0:dst_x0+copy_w, 3:4] = np.clip(out_alpha, 0, 1)
 
                 except Exception as e:
-                    print(f"{'  ' * depth}  ⚠️  合成 {cl.name} 失败: {e}")
+                    logger.warning(f"{'  ' * depth}  ⚠️  合成 {cl.name} 失败: {e}")
 
             # --- 步骤2.5: 应用 base 图层的 user mask（图层蒙版）---
             merged_raw = ImageArrayUtils.float_array_to_pil(canvas_raw)
@@ -483,14 +489,14 @@ class LayerExporter:
             rel_path = self._save_image_dedup(final_img, base_name, depth)
             layer_info['image_path'] = rel_path
 
-            print(f"{'  ' * depth}🖼️  {base_name} [合并{len(clipped_layers)+1}层 {canvas_w}x{canvas_h}] → {rel_path}")
+            logger.info(f"{'  ' * depth}🖼️  {base_name} [合并{len(clipped_layers)+1}层 {canvas_w}x{canvas_h}] → {rel_path}")
             self.exported_count += 1
             # 被合并的 clipped 图层计入已导出
             self.exported_count += len(clipped_layers)
             return layer_info
 
         except Exception as e:
-            print(f"{'  ' * depth}❌ 合并剪切蒙版失败 ({base_layer.name}): {e}")
+            logger.error(f"{'  ' * depth}❌ 合并剪切蒙版失败 ({base_layer.name}): {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -552,13 +558,13 @@ class LayerExporter:
 
     def verify_export(self) -> None:
         """打印导出统计"""
-        print(f"\n📊 图层导出统计:")
-        print(f"  ✅ 成功: {self.exported_count}")
-        print(f"  🚫 跳过: {self.skipped_count}")
+        logger.info("\n📊 图层导出统计:")
+        logger.info(f"  ✅ 成功: {self.exported_count}")
+        logger.info(f"  🚫 跳过: {self.skipped_count}")
         if self._dedup_count > 0:
-            print(f"  ♻️  去重: {self._dedup_count} 张图片复用 (实际保存 {len(self._image_hash_map)} 张)")
+            logger.info(f"  ♻️  去重: {self._dedup_count} 张图片复用 (实际保存 {len(self._image_hash_map)} 张)")
         if self.exported_count == 0:
-            print("  ⚠️  警告: 没有导出任何图层!")
+            logger.warning("  ⚠️  警告: 没有导出任何图层!")
 
     # ------------------------------------------------------------------
     # 内部方法
@@ -581,7 +587,7 @@ class LayerExporter:
         # （position:absolute + overflow:hidden 创建 stacking context），
         # 导致黑色恒等色像素暴露为真实黑底。
         if id(layer) in self._suppressed_light_layers:
-            print(f"{'  ' * depth}🔦 {layer_name} (光效穿透层，已合成到目标层，跳过独立导出)")
+            logger.info(f"{'  ' * depth}🔦 {layer_name} (光效穿透层，已合成到目标层，跳过独立导出)")
             self.skipped_count += 1
             return None
 
@@ -618,7 +624,7 @@ class LayerExporter:
             if is_text:
                 # 有旋转/倾斜的文本无法用 CSS 还原，降级为图片
                 if TextExtractor.has_transform(layer):
-                    print(f"{'  ' * depth}🔄 {layer_name} (文本有旋转/倾斜 → 降级为图片)")
+                    logger.info(f"{'  ' * depth}🔄 {layer_name} (文本有旋转/倾斜 → 降级为图片)")
                     is_text = False
                 # 有效果（描边/阴影/发光）的文本降级为图片，由效果渲染器处理
                 # 注意：必须同时满足"图层样式整体开关 enabled=True"和"至少一个子效果 enabled=True"
@@ -626,7 +632,7 @@ class LayerExporter:
                 elif hasattr(layer, 'effects') and layer.effects and any(
                     is_effect_active(e, layer) for e in layer.effects
                 ):
-                    print(f"{'  ' * depth}✨ {layer_name} (文本有效果 → 降级为图片)")
+                    logger.info(f"{'  ' * depth}✨ {layer_name} (文本有效果 → 降级为图片)")
                     is_text = False
                 else:
                     text_data = TextExtractor.extract_text_info(
@@ -637,7 +643,7 @@ class LayerExporter:
                         layer_info['text'] = text_data['text']
                         layer_info['text_style'] = text_data['style']
                         preview = text_data['text'][:20].replace('\n', '\\n')
-                        print(f"{'  ' * depth}📝 {layer_name} [\"{preview}\"]")
+                        logger.info(f"{'  ' * depth}📝 {layer_name} [\"{preview}\"]")
                         self.exported_count += 1
                         return layer_info
                     else:
@@ -662,7 +668,7 @@ class LayerExporter:
                 return None
 
         except Exception as e:
-            print(f"{'  ' * depth}❌ {layer_name} 导出失败: {e}")
+            logger.error(f"{'  ' * depth}❌ {layer_name} 导出失败: {e}")
             self.skipped_count += 1
             return None
 
@@ -742,12 +748,12 @@ class LayerExporter:
                 # current_bbox 保持不变（光效层不扩展覆盖范围）
 
                 light_name = light_info.layer.name or 'light'
-                print(f"{'  ' * depth}💡 {layer_name} ← 叠加光效 {light_name} "
+                logger.info(f"{'  ' * depth}💡 {layer_name} ← 叠加光效 {light_name} "
                       f"(blend={str(light_layer.blend_mode)})")
 
             except Exception as e:
                 light_name = getattr(light_info.layer, 'name', '?')
-                print(f"{'  ' * depth}⚠️  叠加光效 {light_name} 失败: {e}")
+                logger.warning(f"{'  ' * depth}⚠️  叠加光效 {light_name} 失败: {e}")
 
         result_img = ImageArrayUtils.float_array_to_pil(base_arr)
         return result_img, current_bbox
@@ -804,7 +810,7 @@ class LayerExporter:
                     cl_img = None
 
             if cl_img is None or cl_img.size[0] == 0 or cl_img.size[1] == 0:
-                print(f"{'  ' * depth}🚫 {layer_name} (空剪贴层)")
+                logger.info(f"{'  ' * depth}🚫 {layer_name} (空剪贴层)")
                 self.skipped_count += 1
                 return None
 
@@ -821,7 +827,7 @@ class LayerExporter:
                 base_alpha_img = None
             if base_alpha_img is None or base_alpha_img.size[0] == 0 or base_alpha_img.size[1] == 0:
                 # base 无法 composite → 退回不剪裁的导出（保留旧行为）
-                print(
+                logger.info(
                     f"{'  ' * depth}⚠️  {layer_name} 剪贴 base '{base_group.name}' "
                     f"composite 失败，回退普通导出"
                 )
@@ -845,7 +851,7 @@ class LayerExporter:
             inter_bottom = min(cl_bottom, base_bottom)
 
             if inter_right <= inter_left or inter_bottom <= inter_top:
-                print(f"{'  ' * depth}🚫 {layer_name} (剪贴交集为空)")
+                logger.info(f"{'  ' * depth}🚫 {layer_name} (剪贴交集为空)")
                 self.skipped_count += 1
                 return None
 
@@ -885,7 +891,7 @@ class LayerExporter:
 
             # 检查是否完全透明
             if cl_patch[:, :, 3].max() <= 0.0:
-                print(f"{'  ' * depth}🚫 {layer_name} (剪贴后完全透明)")
+                logger.info(f"{'  ' * depth}🚫 {layer_name} (剪贴后完全透明)")
                 self.skipped_count += 1
                 return None
 
@@ -894,7 +900,7 @@ class LayerExporter:
             ys = np.where(alpha_2d > 0)[0]
             xs = np.where(alpha_2d > 0)[1]
             if ys.size == 0 or xs.size == 0:
-                print(f"{'  ' * depth}🚫 {layer_name} (剪贴后空)")
+                logger.info(f"{'  ' * depth}🚫 {layer_name} (剪贴后空)")
                 self.skipped_count += 1
                 return None
             y0, y1 = int(ys.min()), int(ys.max()) + 1
@@ -916,7 +922,7 @@ class LayerExporter:
             rel_left = abs_left - parent_left
             rel_top = abs_top - parent_top
 
-            print(
+            logger.info(
                 f"{'  ' * depth}✂️  {layer_name} "
                 f"(剪贴 {base_group.name}"
                 f"{'(pass-thru/矩形)' if base_is_pass_through else '/alpha'} → "
@@ -941,7 +947,7 @@ class LayerExporter:
             return layer_info
 
         except Exception as e:
-            print(f"{'  ' * depth}❌ {layer_name} 剪贴导出失败: {e}")
+            logger.error(f"{'  ' * depth}❌ {layer_name} 剪贴导出失败: {e}")
             import traceback
             traceback.print_exc()
             self.skipped_count += 1
@@ -970,7 +976,7 @@ class LayerExporter:
                     is_effect_active(e, layer) for e in layer.effects
                 )
                 if has_fx:
-                    print(f"{'  ' * depth}✨ {layer_name} (含效果渲染)")
+                    logger.info(f"{'  ' * depth}✨ {layer_name} (含效果渲染)")
             else:
                 img = None  # 回退
 
@@ -980,7 +986,7 @@ class LayerExporter:
                 img = layer.topil()
                 bbox = layer.bbox
             except Exception as e:
-                print(f"{'  ' * depth}⚠️  {layer_name} topil 失败: {e}")
+                logger.warning(f"{'  ' * depth}⚠️  {layer_name} topil 失败: {e}")
                 img = None
 
             # ── 2.1. 如果 topil() 失败，尝试 composite() ──
@@ -991,13 +997,13 @@ class LayerExporter:
                     img = layer.composite()
                     bbox = layer.bbox
                     if img is not None and img.size[0] > 0 and img.size[1] > 0:
-                        print(f"{'  ' * depth}🔷 {layer_name} (shape图层，使用composite渲染)")
+                        logger.info(f"{'  ' * depth}🔷 {layer_name} (shape图层，使用composite渲染)")
                 except Exception as e:
-                    print(f"{'  ' * depth}⚠️  {layer_name} composite 失败: {e}")
+                    logger.warning(f"{'  ' * depth}⚠️  {layer_name} composite 失败: {e}")
                     return None
 
         if img is None or img.size[0] == 0 or img.size[1] == 0:
-            print(f"{'  ' * depth}🚫 {layer_name} (空图层)")
+            logger.info(f"{'  ' * depth}🚫 {layer_name} (空图层)")
             return None
 
         # ── 2.5. 应用图层蒙版（user mask）──
@@ -1014,7 +1020,7 @@ class LayerExporter:
         # 检查 mask 后是否完全透明
         img_check = np.array(img)
         if img_check[:, :, 3].max() == 0:
-            print(f"{'  ' * depth}🚫 {layer_name} (mask后完全透明)")
+            logger.info(f"{'  ' * depth}🚫 {layer_name} (mask后完全透明)")
             return None
 
         # ── 2.6b. 降级光效层去恒等色处理 ──
@@ -1026,7 +1032,7 @@ class LayerExporter:
         # 解决：用亮度作为 alpha 衰减因子——越暗的像素越透明。
         if id(layer) in self._fallback_light_layers:
             img = self._remove_identity_color(img)
-            print(f"{'  ' * depth}🔄 {layer_name} (降级光效: 去除恒等色黑底)")
+            logger.info(f"{'  ' * depth}🔄 {layer_name} (降级光效: 去除恒等色黑底)")
 
         # ── 2.7. 叠加穿透光效层（Phase 4）──
         # 如果当前图层在 penetrate_map 中有对应的光效层，叠加渲染
@@ -1050,7 +1056,7 @@ class LayerExporter:
         cb = min(clip_bottom, bottom)
 
         if cr <= cl or cb <= ct:
-            print(f"{'  ' * depth}🚫 {layer_name} (完全在裁剪区域外)")
+            logger.info(f"{'  ' * depth}🚫 {layer_name} (完全在裁剪区域外)")
             return None
 
         adj_left = 0
@@ -1066,17 +1072,17 @@ class LayerExporter:
                 adj_left = cl - left
                 adj_top = ct - top
             else:
-                print(f"{'  ' * depth}🚫 {layer_name} (裁剪后为空)")
+                logger.info(f"{'  ' * depth}🚫 {layer_name} (裁剪后为空)")
                 return None
 
         if img.size[0] == 0 or img.size[1] == 0:
-            print(f"{'  ' * depth}🚫 {layer_name} (裁剪后为空)")
+            logger.info(f"{'  ' * depth}🚫 {layer_name} (裁剪后为空)")
             return None
 
         # ── 4. 保存图片（去重）──
         rel_path = self._save_image_dedup(img, layer_name, depth)
 
-        print(f"{'  ' * depth}🖼️  {layer_name} [{img.size[0]}x{img.size[1]}] → {rel_path}")
+        logger.info(f"{'  ' * depth}🖼️  {layer_name} [{img.size[0]}x{img.size[1]}] → {rel_path}")
 
         # 计算效果渲染后的实际坐标偏移（相对于原始 layer bbox）
         # 效果（如描边/阴影）会扩展 bbox，需要把偏移传回给调用方
@@ -1223,7 +1229,7 @@ class LayerExporter:
                             )
                     return
             except Exception as e:
-                print(f"{'  ' * (depth + depth_offset)}  ⚠️  子组 composite 失败: {e}")
+                logger.warning(f"{'  ' * (depth + depth_offset)}  ⚠️  子组 composite 失败: {e}")
             # 降级：递归渲染子图层
             for child in sub_grp:
                 render_layer(child, depth_offset + 1)
@@ -1373,7 +1379,7 @@ class LayerExporter:
                                         bm_str,
                                     )
                     except Exception as e:
-                        print(f"  ⚠️  clipping composite 失败: {e}")
+                        logger.warning(f"  ⚠️  clipping composite 失败: {e}")
                     finally:
                         for sibling, vis in clip_saved:
                             try:
@@ -1511,7 +1517,7 @@ class LayerExporter:
                                             region_rgb * (1.0 - mask) + adjusted * mask,
                                             0.0, 1.0)
                             except Exception as e:
-                                print(f"  ⚠️  调整层 ratio-transfer 失败: {e}")
+                                logger.warning(f"  ⚠️  调整层 ratio-transfer 失败: {e}")
 
                         # 用 base 原始 alpha 裁剪
                         base_arr[:, :, 3:4] = np.minimum(
@@ -1627,16 +1633,16 @@ class LayerExporter:
                 return None
 
             child_names = [c.name for c in group_layer if c.visible and c.opacity > 0]
-            print(f"{'  ' * depth}🔗 合并组图层(PSD 合成簇): {group_name} "
+            logger.info(f"{'  ' * depth}🔗 合并组图层(PSD 合成簇): {group_name} "
                   f"({len(child_names)}层: {child_names})")
 
             expand = self._calc_group_expand(group_layer)
             has_overlay_effects = self._group_has_overlay_effects(group_layer)
             if expand > 0 or has_overlay_effects:
                 if expand > 0:
-                    print(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染")
+                    logger.info(f"{'  ' * depth}  🌟 检测到效果溢出 {expand}px，使用混合渲染")
                 else:
-                    print(f"{'  ' * depth}  🌟 检测到叠加效果(渐变/颜色叠加)，使用混合渲染")
+                    logger.info(f"{'  ' * depth}  🌟 检测到叠加效果(渐变/颜色叠加)，使用混合渲染")
                 # ── 双路径：hybrid（保留溢出效果） + 内部 composite 覆盖 ──
                 # hybrid 手动逐层 alpha_composite，无法处理剪贴蒙版关系
                 # （clip=True 图层独立 render_layer_with_effects 出来常常是
@@ -1670,12 +1676,12 @@ class LayerExporter:
                             composite_img.paste(transparent, (expand, expand))
                             composite_img.paste(inner_img, (expand, expand))
                     except Exception as e:
-                        print(f"{'  ' * depth}  ⚠️  内部 composite 覆盖失败: {e}")
+                        logger.warning(f"{'  ' * depth}  ⚠️  内部 composite 覆盖失败: {e}")
             else:
                 composite_img = group_layer.composite(viewport=grp_bbox)
 
             if composite_img is None:
-                print(f"{'  ' * depth}  ⚠️  composite() 返回 None")
+                logger.warning(f"{'  ' * depth}  ⚠️  composite() 返回 None")
                 return None
             if composite_img.mode != 'RGBA':
                 composite_img = composite_img.convert('RGBA')
@@ -1712,15 +1718,15 @@ class LayerExporter:
                     actual_w = cr - cl
                     actual_h = cb - ct
                 else:
-                    print(f"{'  ' * depth}🚫 {group_name} (裁剪后为空)")
+                    logger.info(f"{'  ' * depth}🚫 {group_name} (裁剪后为空)")
                     return None
             else:
-                print(f"{'  ' * depth}🚫 {group_name} (完全在画布外)")
+                logger.info(f"{'  ' * depth}🚫 {group_name} (完全在画布外)")
                 return None
 
             img_arr = np.array(composite_img)
             if img_arr[:, :, 3].max() == 0:
-                print(f"{'  ' * depth}🚫 {group_name} (合并后完全透明)")
+                logger.info(f"{'  ' * depth}🚫 {group_name} (合并后完全透明)")
                 return None
 
             # ── Phase 4 补充：组合成后叠加穿透光效层 ──
@@ -1769,13 +1775,13 @@ class LayerExporter:
 
             visible_count = len(child_names)
             total_count = len(list(group_layer))
-            print(f"{'  ' * depth}🖼️  {group_name} "
+            logger.info(f"{'  ' * depth}🖼️  {group_name} "
                   f"[合并{visible_count}/{total_count}层 {actual_w}x{actual_h}] → {rel_path}")
             self.exported_count += total_count
             return layer_info
 
         except Exception as e:
-            print(f"{'  ' * depth}❌ 合并组 {group_name} 失败: {e}")
+            logger.error(f"{'  ' * depth}❌ 合并组 {group_name} 失败: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -1821,7 +1827,7 @@ class LayerExporter:
                 depth, parent_left, parent_top,
             )
 
-        print(f"{'  ' * depth}🎯 {group_name} "
+        logger.info(f"{'  ' * depth}🎯 {group_name} "
               f"(非文本合并为背景图，文本独立: {len(text_layers)} 个文本)")
 
         saved: list[tuple[Any, bool]] = []
@@ -1951,7 +1957,7 @@ class LayerExporter:
 
         if suppressed_in_cluster:
             suppressed_names = [m.name for m in suppressed_in_cluster]
-            print(f"{'  ' * depth}🔦 cluster 内排除光效层: {suppressed_names} "
+            logger.info(f"{'  ' * depth}🔦 cluster 内排除光效层: {suppressed_names} "
                   f"(已穿透合成/降级为CSS blend)")
 
         # 如果 cluster 所有成员都被排除，不需要合成
@@ -1963,13 +1969,13 @@ class LayerExporter:
                     c.visible = vis
                 except Exception:
                     pass
-            print(f"{'  ' * depth}🔦 cluster 全部成员已被光效穿透抑制，跳过合成")
+            logger.info(f"{'  ' * depth}🔦 cluster 全部成员已被光效穿透抑制，跳过合成")
             return None
 
         try:
             mname = f"{group_name}{suffix}" if suffix else group_name
             mfull = f"{full_name}{suffix}" if suffix else full_name
-            print(f"{'  ' * depth}🧬 合并 cluster: {mname} "
+            logger.info(f"{'  ' * depth}🧬 合并 cluster: {mname} "
                   f"({len(effective_members)}层: {[m.name for m in effective_members]})")
             return self._merge_group_as_single_image(
                 group_layer, mname, mfull,

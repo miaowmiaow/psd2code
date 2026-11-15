@@ -9,9 +9,7 @@
   - 带 z-index 子保留 relative
 """
 
-import pytest
 from bs4 import BeautifulSoup
-from unittest.mock import MagicMock, patch
 
 from targets.html.postprocess.layout_optimizer.transformers.flex_applier import (
     FlexApplier,

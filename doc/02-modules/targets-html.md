@@ -9,7 +9,7 @@
 targets/html/
 ├── __init__.py          # 触发 HtmlTarget 注册
 ├── target.py            # @register("html") class HtmlTarget
-├── pipeline.py          # 4 个 Stage + build_html_pipeline()
+├── pipeline.py          # 6 段 Stage + build_html_prefix_stages()
 ├── codegen/
 │   ├── html_generator.py   # HTMLGenerator（Composition）
 │   ├── context.py          # CodegenContext
@@ -62,7 +62,8 @@ targets/html/
 @register("html")
 class HtmlTarget(Target):
     def build_pipeline(self, ctx):
-        return build_html_pipeline(ctx)
+        # 三端共用的前缀链（React / Vue 传 subdir_name="html" 后追加自己的转换段）
+        return Pipeline(build_html_prefix_stages())
 ```
 
 `targets/html/__init__.py` 会 `from .target import HtmlTarget` 触发装饰器。
@@ -70,13 +71,17 @@ class HtmlTarget(Target):
 
 ## Pipeline
 
-`targets/html/pipeline.py` 定义并装配 4 个 Stage：
+`targets/html/pipeline.py` 定义并装配 **6 段** Stage（`build_html_prefix_stages()`，
+三端共用；React / Vue 在其后追加 `HtmlToReact/HtmlToVue` + `Scaffold`）：
 
 | Stage | 职责 | 读 ctx | 写 ctx |
 | ----- | ---- | ------ | ------ |
 | `LoadPsdStage` | `PSDImage.open`；清理并创建输出目录 | `psd_path`, `output_dir` | `psd`, `output_dir` |
 | `ParseToIrStage` | PSD → IR；**副作用：导出所有图片** | `psd`, `output_dir` | `ir`, `artifacts.layer_exporter`, `artifacts.legacy_layers` |
 | `HtmlCodegenStage` | IR → HTML/CSS/JS/metadata/README | `ir`, `artifacts.layer_exporter` | `artifacts.html_generator`, `artifacts.html_path` |
+| `BgNestingRestructureStage` | 背景嵌套重组：让"整块底图"的容器化 DOM 与
+flex 结构兼容（原 `data-bg-nested` 标记由本段写入） | `artifacts.html_path` | 同左 |
+| `PrunePreOptimizeStage` | 被完全遮挡图层剔除（在优化器之前跑，避免下游为不可见图层生成 CSS） | `artifacts.html_path` | 同左 |
 | `LayoutOptimizeStage` | 后处理：DOM 重构 + 图层扁平化 + 兄弟同质簇 + Flex 推断 + Wrapper 折叠 + CSS 去冗余 + 位置噪声宽容合并 + 重复元素抽取 + 语义类去后缀 + 虚拟 wrapper 命名 + CSS 美化 + dev metadata 剥离 | `artifacts.html_path`, `artifacts.css_pretty_enabled?`, `artifacts.css_pretty_style?` | `artifacts.html_path`（覆盖为 optimized）, `artifacts.layout_stats`；副作用产物：`layer_map.json`、`class_alias_map.json` |
 
 `LayoutOptimizeStage` 主动 try/except，失败时保留原始 `html_path`，**不** 抛出。

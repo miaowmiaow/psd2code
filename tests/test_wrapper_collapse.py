@@ -11,7 +11,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
 from bs4 import BeautifulSoup
 
 from targets.html.postprocess.layout_optimizer.transformers.wrapper_collapse import (

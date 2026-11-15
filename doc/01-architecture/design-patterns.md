@@ -89,7 +89,8 @@ class Target(ABC):
 ```
 
 - 父类 `run()` 固定了"装配→执行"骨架；子类只实现 `build_pipeline`。
-- `HtmlTarget.build_pipeline = build_html_pipeline`。
+- `HtmlTarget.build_pipeline` → `Pipeline(build_html_prefix_stages())`；
+  React / Vue 复用同一条前缀链（`subdir_name="html"`），保证三端优化不漂移。
 
 ## 5. Chain of Responsibility：Layer Handler
 

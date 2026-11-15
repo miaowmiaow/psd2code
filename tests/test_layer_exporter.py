@@ -1,8 +1,10 @@
-"""Tests for core.extract.layer_exporter — static/utility methods.
+"""Tests for core.extract — clipping / geometry / blend utilities.
 
 Covers:
-- LayerExporter._is_clipping: clipping attribute detection
-- LayerExporter._group_clipping_layers: chain grouping logic
+- ClippingHandler.is_clipping_layer: clipping attribute detection
+  （原 ``ClippingHandler.is_clipping_layer``，重构后归入 ClippingHandler）
+- ClippingHandler.group_clipping_layers: chain grouping logic
+  （原 ``ClippingHandler.group_clipping_layers``）
 - LayerExporter._intersect_bbox: rectangle intersection
 - LayerExporter._blend_light_layer: light blend mode math (screen/dodge/add/lighten/lighter)
 """
@@ -11,18 +13,18 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+from core.extract.clipping_handler import ClippingHandler
 from core.extract.layer_exporter import LayerExporter
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# _is_clipping
+# ClippingHandler.is_clipping_layer
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestIsClipping:
@@ -31,36 +33,36 @@ class TestIsClipping:
         layer = MagicMock()
         layer._record = MagicMock()
         layer._record.clipping = 1
-        assert LayerExporter._is_clipping(layer) is True
+        assert ClippingHandler.is_clipping_layer(layer) is True
 
     def test_non_clipping_layer(self):
         """Layer with _record.clipping == 0 is NOT clipping."""
         layer = MagicMock()
         layer._record = MagicMock()
         layer._record.clipping = 0
-        assert LayerExporter._is_clipping(layer) is False
+        assert ClippingHandler.is_clipping_layer(layer) is False
 
     def test_no_record_attribute(self):
         """Layer without _record attribute is NOT clipping."""
         layer = MagicMock(spec=[])  # no attributes
-        assert LayerExporter._is_clipping(layer) is False
+        assert ClippingHandler.is_clipping_layer(layer) is False
 
     def test_record_without_clipping(self):
         """Layer with _record but no clipping field is NOT clipping."""
         layer = MagicMock()
         layer._record = MagicMock(spec=[])  # _record has no .clipping
-        assert LayerExporter._is_clipping(layer) is False
+        assert ClippingHandler.is_clipping_layer(layer) is False
 
     def test_clipping_value_2(self):
         """Only clipping == 1 counts; other truthy values don't match."""
         layer = MagicMock()
         layer._record = MagicMock()
         layer._record.clipping = 2
-        assert LayerExporter._is_clipping(layer) is False
+        assert ClippingHandler.is_clipping_layer(layer) is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# _group_clipping_layers
+# ClippingHandler.group_clipping_layers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_layer(name: str, clipping: int = 0):
@@ -78,14 +80,14 @@ class TestGroupClippingLayers:
         a = _make_layer("A", 0)
         b = _make_layer("B", 0)
         c = _make_layer("C", 0)
-        result = LayerExporter._group_clipping_layers([a, b, c])
+        result = ClippingHandler.group_clipping_layers([a, b, c])
         assert result == [a, b, c]
 
     def test_single_clipping_group(self):
         """Base + 1 clipped → (base, [clipped])."""
         base = _make_layer("Base", 0)
         clip = _make_layer("Clip", 1)
-        result = LayerExporter._group_clipping_layers([base, clip])
+        result = ClippingHandler.group_clipping_layers([base, clip])
         assert len(result) == 1
         assert isinstance(result[0], tuple)
         assert result[0][0] is base
@@ -97,7 +99,7 @@ class TestGroupClippingLayers:
         c1 = _make_layer("C1", 1)
         c2 = _make_layer("C2", 1)
         c3 = _make_layer("C3", 1)
-        result = LayerExporter._group_clipping_layers([base, c1, c2, c3])
+        result = ClippingHandler.group_clipping_layers([base, c1, c2, c3])
         assert len(result) == 1
         assert result[0] == (base, [c1, c2, c3])
 
@@ -110,7 +112,7 @@ class TestGroupClippingLayers:
         c_clip1 = _make_layer("C_clip1", 1)
         c_clip2 = _make_layer("C_clip2", 1)
 
-        result = LayerExporter._group_clipping_layers([a, a_clip, b, c, c_clip1, c_clip2])
+        result = ClippingHandler.group_clipping_layers([a, a_clip, b, c, c_clip1, c_clip2])
         assert len(result) == 3
         assert result[0] == (a, [a_clip])
         assert result[1] is b
@@ -120,13 +122,13 @@ class TestGroupClippingLayers:
         """Clipping layer at start (no base) → treated as normal layer."""
         orphan = _make_layer("Orphan", 1)
         normal = _make_layer("Normal", 0)
-        result = LayerExporter._group_clipping_layers([orphan, normal])
+        result = ClippingHandler.group_clipping_layers([orphan, normal])
         assert len(result) == 2
         assert result[0] is orphan
         assert result[1] is normal
 
     def test_empty_list(self):
-        result = LayerExporter._group_clipping_layers([])
+        result = ClippingHandler.group_clipping_layers([])
         assert result == []
 
     def test_consecutive_orphans(self):
@@ -134,7 +136,7 @@ class TestGroupClippingLayers:
         c1 = _make_layer("C1", 1)
         c2 = _make_layer("C2", 1)
         c3 = _make_layer("C3", 1)
-        result = LayerExporter._group_clipping_layers([c1, c2, c3])
+        result = ClippingHandler.group_clipping_layers([c1, c2, c3])
         # First orphan c1 is standalone, then c2 is orphan, then c3 is orphan
         # Actually: c1 is clipping (orphan) → standalone;
         # c2 is clipping (orphan) → standalone; c3 is clipping (orphan) → standalone
@@ -145,7 +147,7 @@ class TestGroupClippingLayers:
         base = _make_layer("Base", 0)
         clip = _make_layer("Clip", 1)
         after = _make_layer("After", 0)
-        result = LayerExporter._group_clipping_layers([base, clip, after])
+        result = ClippingHandler.group_clipping_layers([base, clip, after])
         assert len(result) == 2
         assert result[0] == (base, [clip])
         assert result[1] is after
@@ -356,3 +358,46 @@ class TestBlendLightLayer:
         result = LayerExporter._blend_light_layer(base, light, "BlendMode.COLOR_DODGE", 1.0)
         assert result[:, :, :3].max() <= 1.0
         assert result[:, :, :3].min() >= 0.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LayerExporter 与新模块的接线（原 test_phase3_switchover.py 的有效断言）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExporterWiring:
+    """验证 LayerExporter 已接线到 P2/P3 抽出的独立模块。
+
+    ``USE_NEW_MODULES`` 开关已在 P3 收尾时移除（新模块成为唯一路径），
+    因此这里只断言"抽出的模块真的被用上了"，不再断言开关本身。
+    """
+
+    @staticmethod
+    def _make_exporter():
+        from core.extract.exporter_context import LayerExporterContext  # noqa: F401
+        psd = MagicMock()
+        psd.width = 1920
+        psd.height = 1080
+        with patch("pathlib.Path.mkdir"):
+            return LayerExporter(psd, Path("/tmp/output"))
+
+    def test_context_initialized(self):
+        from core.extract.exporter_context import LayerExporterContext
+
+        exporter = self._make_exporter()
+        assert isinstance(exporter.ctx, LayerExporterContext)
+        assert exporter.ctx.canvas_width == 1920
+        assert exporter.ctx.canvas_height == 1080
+
+    def test_clipping_handler_wired(self):
+        exporter = self._make_exporter()
+        assert exporter._clipping_handler is ClippingHandler
+
+    def test_extracted_modules_importable(self):
+        from core.extract import layer_exporter
+
+        for attr in ("LightEffectRenderer", "ClippingHandler", "LayerExporterContext"):
+            assert hasattr(layer_exporter, attr), attr
+
+    def test_light_effect_renderer_api(self):
+        from core.extract.light_effect_renderer import LightEffectRenderer
+
+        assert hasattr(LightEffectRenderer, "pre_scan")

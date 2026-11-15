@@ -211,7 +211,7 @@ class TestLayer1Cleaner:
     def test_case_insensitive_match(self):
         """Dict matching should be case insensitive."""
         cand1 = self.cleaner.analyze("背景图层", "image")
-        cand2 = self.cleaner.analyze("BACKGROUND", "image")  # May or may not match depending on dict
+        self.cleaner.analyze("BACKGROUND", "image")  # May or may not match depending on dict
         # At least the Chinese one should match
         assert cand1 is not None
 
